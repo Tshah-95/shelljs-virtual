@@ -1,0 +1,12 @@
+{
+  "/project/package.json": "{\n  \"name\": \"test\",\n  \"version\": \"1.0.0\"\n}\n",
+  "/project/tsconfig.json": "{\n  \"compilerOptions\": {\n    \"strict\": true\n  }\n}\n",
+  "/project/src/index.ts": "export { hello } from \"./utils/hello\";\nexport { add } from \"./math/add\";\n",
+  "/project/src/utils/hello.ts": "// greeting utility\nexport function hello(name: string): string {\n  return `Hello, ${name}!`;\n}\n",
+  "/project/src/utils/format.ts": "export function formatDate(d: Date): string {\n  return d.toISOString();\n}\n",
+  "/project/src/math/add.ts": "// addition\nexport const add = (a: number, b: number): number => a + b;\n",
+  "/project/src/math/multiply.ts": "// multiplication\nexport const multiply = (a: number, b: number): number => a * b;\n",
+  "/project/src/types.ts": "export interface User {\n  id: number;\n  name: string;\n  email: string;\n}\n\nexport type Role = \"admin\" | \"user\" | \"guest\";\n",
+  "/project/README.md": "# Test Project\n\nA sample project for testing.\n",
+  "/project/.gitignore": "node_modules\ndist\n*.js\n"
+}
