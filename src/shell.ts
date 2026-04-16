@@ -147,26 +147,30 @@ export class Shell {
   }
 
   cat(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    let numberLines = false;
-    const files = args
-      .filter((value) => !isPipeInput(value))
-      .flatMap((value) => toArray(value as string | string[]))
-      .filter((value) => {
-        if (value === '-n') {
-          numberLines = true;
-          return false;
-        }
-        return true;
-      });
-    if (files.length === 0) {
-      const content = pipe?.stdin ?? '';
-      return this.success(numberLines ? this.numberLines(content) : content);
-    }
+    try {
+      const pipe = this.extractPipeInput(args);
+      let numberLines = false;
+      const files = args
+        .filter((value) => !isPipeInput(value))
+        .flatMap((value) => toArray(value as string | string[]))
+        .filter((value) => {
+          if (value === '-n') {
+            numberLines = true;
+            return false;
+          }
+          return true;
+        });
+      if (files.length === 0) {
+        const content = pipe?.stdin ?? '';
+        return this.success(numberLines ? this.numberLines(content) : content);
+      }
 
-    const parts = files.flatMap((input) => this.expandPaths(String(input))).map((target) => readTextFile(this.fs, target));
-    const content = parts.join('');
-    return this.success(numberLines ? this.numberLines(content) : content);
+      const parts = files.flatMap((input) => this.expandPaths(String(input))).map((target) => readTextFile(this.fs, target));
+      const content = parts.join('');
+      return this.success(numberLines ? this.numberLines(content) : content);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   find(...paths: string[]): ShellArrayResult<string> {
@@ -203,35 +207,39 @@ export class Shell {
   }
 
   grep(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const { options, pattern, paths } = this.parseGrepArgs(args.filter((value) => !isPipeInput(value)));
-    const matcher = this.createMatcher(pattern, options);
-    const targets = this.collectGrepTargets(paths, options);
-    const fromStdin = pipe?.stdin;
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, pattern, paths } = this.parseGrepArgs(args.filter((value) => !isPipeInput(value)));
+      const matcher = this.createMatcher(pattern, options);
+      const targets = this.collectGrepTargets(paths, options);
+      const fromStdin = pipe?.stdin;
 
-    if (fromStdin !== undefined) {
-      const stdout = this.grepContent('(stdin)', fromStdin, matcher, options, false);
-      return this.success(stdout, stdout.length > 0 ? 0 : 1);
-    }
-
-    const showFilenameDefault = targets.length > 1;
-    const outputs: string[] = [];
-
-    for (const target of targets) {
-      const content = this.fs.readFileSync(target);
-      if (looksBinary(content)) {
-        continue;
+      if (fromStdin !== undefined) {
+        const stdout = this.grepContent('(stdin)', fromStdin, matcher, options, false);
+        return this.success(stdout, stdout.length > 0 ? 0 : 1);
       }
 
-      const displayName = relativeDisplayPath(this.cwd, target);
-      const stdout = this.grepContent(displayName, decodeText(content), matcher, options, showFilenameDefault);
-      if (stdout.length > 0) {
-        outputs.push(stdout);
-      }
-    }
+      const showFilenameDefault = targets.length > 1;
+      const outputs: string[] = [];
 
-    const combined = outputs.filter(Boolean).join('\n');
-    return this.success(combined, combined.length > 0 ? 0 : 1);
+      for (const target of targets) {
+        const content = this.fs.readFileSync(target);
+        if (looksBinary(content)) {
+          continue;
+        }
+
+        const displayName = relativeDisplayPath(this.cwd, target);
+        const stdout = this.grepContent(displayName, decodeText(content), matcher, options, showFilenameDefault);
+        if (stdout.length > 0) {
+          outputs.push(stdout);
+        }
+      }
+
+      const combined = outputs.filter(Boolean).join('\n');
+      return this.success(combined, combined.length > 0 ? 0 : 1);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   sed(...args: unknown[]): ShellString {
@@ -770,6 +778,10 @@ export class Shell {
 
   private fail(stderr: string, code = 1): ShellString {
     return new ShellString('', { code, stderr, shell: this });
+  }
+
+  private errorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 
   private expandPaths(value: string): string[] {

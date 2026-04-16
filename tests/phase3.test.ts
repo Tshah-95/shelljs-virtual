@@ -69,6 +69,18 @@ describe('phase 3 text processing', () => {
     expect(fs.readFileSync('/project/src/binary.bin') instanceof Uint8Array).toBe(true);
   });
 
+  test('cat and grep return shell failures for missing paths instead of throwing', () => {
+    const { shell } = createTestShell();
+
+    const catResult = shell.cat('/project/missing.txt');
+    expect(catResult.code).toBe(1);
+    expect(catResult.stderr).toContain('ENOENT');
+
+    const grepResult = shell.grep('hello', '/project/missing.txt');
+    expect(grepResult.code).toBe(1);
+    expect(grepResult.stderr).toContain('ENOENT');
+  });
+
   test('sed supports in-place updates, capture groups, function replacements, and piping', () => {
     const { shell, vol } = createTestShell();
 
