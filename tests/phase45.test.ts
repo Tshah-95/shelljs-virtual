@@ -9,6 +9,11 @@ describe('phase 4 and 5 commands', () => {
     expect(found).toContain('/project/src/utils/hello.ts');
     expect(found).toContain('/project/src/math/multiply.ts');
 
+    const tsOnly = found.filter((file) => file.endsWith('.ts'));
+    expect(Array.isArray(tsOnly)).toBe(true);
+    expect(tsOnly).toContain('/project/src/utils/hello.ts');
+    expect(tsOnly).toContain('/project/src/math/multiply.ts');
+
     shell.cp('/project/src/utils/hello.ts', '/project/tmp-hello.ts');
     shell.sed('-i', /Hello/g, 'Greetings', '/project/src/utils/hello.ts');
 

@@ -103,8 +103,13 @@ export class ShellArrayResult<T = string> extends Array<T> {
   readonly code: number;
   protected readonly shell?: Shell;
 
+  static get [Symbol.species](): ArrayConstructor {
+    return Array;
+  }
+
   constructor(items: T[] = [], options: ResultOptions & { shell?: Shell } = {}) {
-    super(...items);
+    super();
+    this.push(...items);
     this.stdout = items.map((item) => String(item)).join('\n');
     this.stderr = options.stderr ?? '';
     this.code = options.code ?? 0;

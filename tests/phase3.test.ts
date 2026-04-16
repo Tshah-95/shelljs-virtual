@@ -17,10 +17,12 @@ describe('phase 3 text processing', () => {
       ...createTestShell().vol.toJSON(),
       '/project/src/vendor/skip.ts': 'export const ignore = true;\n',
       '/project/src/math/adder.ts': 'export const adder = add;\n',
+      '/project/src/react.tsx': 'import React from "react";\n',
     });
 
     expect(shell.grep('-v', 'export', '/project/README.md').stdout).toContain('# Test Project');
     expect(shell.grep('-rl', 'hello', '/project/src').stdout).toContain('src/index.ts');
+    expect(shell.grep('-rl', 'import.*React', '/project/src').stdout).toContain('src/react.tsx');
     expect(shell.grep('-c', 'export', '/project/src/index.ts').stdout).toBe('2');
     expect(shell.grep('-w', 'add', '/project/src/math/add.ts').stdout).toContain('add =');
 
@@ -102,10 +104,12 @@ describe('phase 3 text processing', () => {
   test('sort, uniq, and wc cover the agent-oriented flags', () => {
     const { shell } = createTestShell({
       '/project/data.txt': '10 zebra\n2 yak\n2 yak\n30 ant\n',
+      '/project/data.csv': 'pear,2\napple,10\nbanana,1\n',
     });
 
     expect(shell.sort('-n', '/project/data.txt').stdout).toBe('2 yak\n2 yak\n10 zebra\n30 ant');
     expect(shell.sort({ '-k': 2, '-r': true }, '/project/data.txt').stdout).toBe('10 zebra\n2 yak\n2 yak\n30 ant');
+    expect(shell.sort({ '-t': ',', '-k': 2, '-n': true }, '/project/data.csv').stdout).toBe('banana,1\npear,2\napple,10');
     expect(shell.sort('-u', '/project/data.txt').stdout).toBe('10 zebra\n2 yak\n30 ant');
 
     expect(shell.uniq('-c', '/project/data.txt').stdout).toContain('2 2 yak');

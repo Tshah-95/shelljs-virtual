@@ -315,8 +315,8 @@ export class Shell {
     let lines = splitLines(pipe?.stdin ?? this.readInputs(paths));
 
     lines.sort((left, right) => {
-      const leftKey = this.sortKey(left, options.key);
-      const rightKey = this.sortKey(right, options.key);
+      const leftKey = this.sortKey(left, options.key, options.separator);
+      const rightKey = this.sortKey(right, options.key, options.separator);
       const order = options.numeric ? Number.parseFloat(leftKey) - Number.parseFloat(rightKey) : leftKey.localeCompare(rightKey);
       return Number.isNaN(order) ? 0 : order;
     });
@@ -724,7 +724,7 @@ export class Shell {
   realpath(target: string): ShellString {
     const resolved = this.resolvePath(target);
     if (this.fs.realpathSync) {
-      return this.success(normalizeVirtualPath(this.fs.realpathSync(resolved)));
+      return this.success(normalizeVirtualPath(decodeText(this.fs.realpathSync(resolved))));
     }
     return this.success(resolved);
   }
@@ -837,23 +837,26 @@ export class Shell {
         if (record['-n']) options.numeric = true;
         if (record['-u']) options.unique = true;
         if (record['-k']) options.key = Number(record['-k']);
-        continue;
-      }
-      if (typeof arg === 'string' && arg.startsWith('-') && arg !== '-k') {
-        parseShortFlags(arg).forEach((flag) => {
-          if (flag === '-r') options.reverse = true;
-          if (flag === '-n') options.numeric = true;
-          if (flag === '-u') options.unique = true;
-          if (flag === '-k') options.key = Number(args[index + 1]);
-        });
-        if (arg.includes('k')) {
-          index += 1;
-        }
+        if (typeof record['-t'] === 'string') options.separator = record['-t'];
         continue;
       }
       if (arg === '-k') {
         options.key = Number(args[index + 1]);
         index += 1;
+        continue;
+      }
+      if (arg === '-t') {
+        options.separator = String(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (typeof arg === 'string' && arg.startsWith('-')) {
+        const flags = parseShortFlags(arg);
+        flags.forEach((flag) => {
+          if (flag === '-r') options.reverse = true;
+          if (flag === '-n') options.numeric = true;
+          if (flag === '-u') options.unique = true;
+        });
         continue;
       }
       if (typeof arg === 'string') {
@@ -982,10 +985,7 @@ export class Shell {
   }
 
   private createMatcher(pattern: string | RegExp, options: ParsedGrepOptions): RegExp {
-    const base =
-      typeof pattern === 'string'
-        ? pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-        : pattern.source;
+    const base = typeof pattern === 'string' ? pattern : pattern.source;
     const source = options.wordRegexp ? `\\b(?:${base})\\b` : base;
     const flags = new Set(((typeof pattern === 'string' ? '' : pattern.flags) + (options.ignoreCase ? 'i' : '')).split(''));
     flags.add('g');
@@ -1114,11 +1114,12 @@ export class Shell {
     return outputLines.join('\n');
   }
 
-  private sortKey(line: string, key?: number): string {
+  private sortKey(line: string, key?: number, separator?: string): string {
     if (!key || key <= 1) {
       return line;
     }
-    return line.trim().split(/\s+/)[key - 1] ?? '';
+    const parts = separator === undefined ? line.trim().split(/\s+/) : line.split(separator);
+    return parts[key - 1]?.trim() ?? '';
   }
 
   private wcCounts(content: string, label: string): {
@@ -1151,7 +1152,7 @@ export class Shell {
     const sourceStat = this.fs.lstatSync ? this.fs.lstatSync(source) : this.fs.statSync(source);
     if (sourceStat.isSymbolicLink() && this.fs.readlinkSync && this.fs.symlinkSync) {
       ensureParentDir(this.fs, destination);
-      this.fs.symlinkSync(this.fs.readlinkSync(source), destination);
+      this.fs.symlinkSync(decodeText(this.fs.readlinkSync(source)), destination);
       return;
     }
 

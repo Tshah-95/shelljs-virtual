@@ -8,7 +8,7 @@ export interface VirtualStat {
 }
 
 export interface VirtualDirent {
-  name: string;
+  name: string | Uint8Array;
   isFile(): boolean;
   isDirectory(): boolean;
   isSymbolicLink(): boolean;
@@ -21,7 +21,7 @@ export interface VirtualFS {
   existsSync(path: string): boolean;
   statSync(path: string): VirtualStat;
   lstatSync?(path: string): VirtualStat;
-  readdirSync(path: string, options?: { withFileTypes?: boolean }): string[] | VirtualDirent[];
+  readdirSync(path: string, options?: { withFileTypes?: boolean }): Array<string | Uint8Array | VirtualDirent>;
   mkdirSync(path: string, options?: { recursive?: boolean }): void;
   rmSync?(path: string, options?: { recursive?: boolean; force?: boolean }): void;
   rmdirSync?(path: string, options?: { recursive?: boolean }): void;
@@ -29,9 +29,9 @@ export interface VirtualFS {
   renameSync(oldPath: string, newPath: string): void;
   copyFileSync?(src: string, dest: string): void;
   symlinkSync?(target: string, path: string): void;
-  readlinkSync?(path: string): string;
+  readlinkSync?(path: string): string | Uint8Array;
   chmodSync?(path: string, mode: number): void;
-  realpathSync?(path: string): string;
+  realpathSync?(path: string): string | Uint8Array;
   utimesSync?(path: string, atime: Date | number, mtime: Date | number): void;
 }
 
@@ -80,6 +80,7 @@ export class ShellArrayResult<T = string> extends Array<T> implements ShellResul
   cat(...args: unknown[]): ShellString;
   head(...args: unknown[]): ShellString;
   tail(...args: unknown[]): ShellString;
+  sort(compareFn?: (a: T, b: T) => number): this;
   sort(...args: unknown[]): ShellString;
   uniq(...args: unknown[]): ShellString;
   wc(...args: unknown[]): ShellString;
