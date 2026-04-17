@@ -1290,7 +1290,7 @@ export class Shell {
 
     const left = leftRaw === null ? '' : decodeText(leftRaw);
     const right = rightRaw === null ? '' : decodeText(rightRaw);
-    if (left === right) {
+    if (left === right && leftPath !== null && rightPath !== null) {
       return null;
     }
 

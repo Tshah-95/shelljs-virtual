@@ -279,7 +279,7 @@ sh.grep('-w', 'add', '/project/src/math/add.ts');
 - Exit code `0` when identical
 - Exit code `1` when different
 - Exit code `2` on command error
-- Renders no-final-newline markers and binary-file output explicitly
+- Renders no-final-newline markers, binary-file output, and empty-file add/delete entries explicitly
 
 #### `splice(file, startLine, deleteCount, ...insertLines)`
 

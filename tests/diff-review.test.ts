@@ -87,4 +87,40 @@ describe('diff review modes', () => {
     expect(stat.stdout).toContain('binary blob.bin');
     expect(stat.stdout).toContain('naïve-🙂.ts');
   });
+
+  test('diff renders empty-file additions and deletions explicitly', () => {
+    const addedShell = createTestShell({
+      '/before/.keep': 'keep\n',
+      '/after/.keep': 'keep\n',
+      '/after/empty.txt': '',
+    }).shell;
+
+    const addedNames = addedShell.diff('--name-only', '/before', '/after');
+    expect(addedNames.code).toBe(1);
+    expect(addedNames.stdout).toBe('empty.txt');
+
+    const addedStat = addedShell.diff('--stat', '/before', '/after');
+    expect(addedStat.code).toBe(1);
+    expect(addedStat.stdout).toContain('empty.txt');
+
+    const addedUnified = addedShell.diff('/before', '/after');
+    expect(addedUnified.code).toBe(1);
+    expect(addedUnified.stdout).toContain('--- /dev/null');
+    expect(addedUnified.stdout).toContain('+++ empty.txt');
+
+    const removedShell = createTestShell({
+      '/before/.keep': 'keep\n',
+      '/before/empty.txt': '',
+      '/after/.keep': 'keep\n',
+    }).shell;
+
+    const removedNames = removedShell.diff('--name-only', '/before', '/after');
+    expect(removedNames.code).toBe(1);
+    expect(removedNames.stdout).toBe('empty.txt');
+
+    const removedUnified = removedShell.diff('/before', '/after');
+    expect(removedUnified.code).toBe(1);
+    expect(removedUnified.stdout).toContain('--- empty.txt');
+    expect(removedUnified.stdout).toContain('+++ /dev/null');
+  });
 });
