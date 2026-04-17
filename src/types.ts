@@ -76,6 +76,12 @@ export interface ParsedUniqOptions {
   ignoreCase: boolean;
 }
 
+export interface ParsedFindOptions {
+  hidden: boolean;
+  exclude: string[];
+  maxResults?: number;
+}
+
 export interface ParsedGrepOptions {
   invert: boolean;
   filesWithMatches: boolean;
@@ -84,12 +90,14 @@ export interface ParsedGrepOptions {
   recursive: boolean;
   countOnly: boolean;
   wordRegexp: boolean;
+  hidden: boolean;
   include: string[];
   exclude: string[];
   excludeDir: string[];
   after: number;
   before: number;
   maxCount?: number;
+  maxCountTotal?: number;
   withFilename?: boolean;
   onlyMatching: boolean;
 }

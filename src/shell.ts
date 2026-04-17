@@ -22,6 +22,7 @@ import { expandGlob, matchesGlob } from './utils/glob.js';
 import { basenameVirtualPath, dirnameVirtualPath, normalizeVirtualPath, resolveVirtualPath } from './utils/path.js';
 import type {
   LongListEntry,
+  ParsedFindOptions,
   ParsedGrepOptions,
   ParsedHeadTailOptions,
   ParsedSortOptions,
@@ -232,37 +233,66 @@ export class Shell {
     }
   }
 
-  find(...paths: string[]): ShellArrayResult<string> {
-    const inputs = paths.length === 0 ? ['.'] : paths;
-    const found = new Set<string>();
+  find(...args: string[]): ShellArrayResult<string> {
+    const { options, paths } = this.parseFindArgs(args);
+    const found: string[] = [];
+    const seen = new Set<string>();
 
-    const visit = (target: string): void => {
-      const absolute = this.resolvePath(target);
-      if (!this.fs.existsSync(absolute)) {
-        return;
-      }
-      const queue = [absolute];
-      while (queue.length > 0) {
-        const current = queue.shift()!;
-        if (found.has(current)) {
-          continue;
-        }
-        found.add(current);
-        if (isDirectory(this.fs, current)) {
-          const entries = this.fs.readdirSync(current);
-          for (const entry of entries) {
-            const name = typeof entry === 'string' ? entry : entry.name;
-            queue.push(normalizeVirtualPath(path.posix.join(current, name)));
-          }
-        }
+    const enqueueChildren = (queue: Array<{ path: string; allowHidden: boolean }>, current: string, allowHidden: boolean): void => {
+      const entries = this.fs.readdirSync(current);
+      const names = entries
+        .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+        .sort((left, right) => left.localeCompare(right));
+
+      for (const name of names) {
+        queue.push({
+          path: normalizeVirtualPath(path.posix.join(current, name)),
+          allowHidden,
+        });
       }
     };
 
-    for (const target of inputs) {
-      this.expandPaths(target).forEach((match) => visit(match));
+    for (const input of paths) {
+      const matches = this.expandPaths(input);
+      for (const match of matches) {
+        if (!this.fs.existsSync(match)) {
+          continue;
+        }
+
+        const queue = [{
+          path: match,
+          allowHidden: options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, match)),
+        }];
+
+        while (queue.length > 0) {
+          if (options.maxResults !== undefined && found.length >= options.maxResults) {
+            return ShellArrayResult.from(found.sort((left, right) => left.localeCompare(right)), this);
+          }
+
+          const { path: current, allowHidden } = queue.shift()!;
+          if (seen.has(current)) {
+            continue;
+          }
+
+          const relative = relativeDisplayPath(this.cwd, current);
+          if (!allowHidden && this.isHiddenSearchPath(relative)) {
+            continue;
+          }
+          if (this.matchesSearchPatterns(options.exclude, relative)) {
+            continue;
+          }
+
+          seen.add(current);
+          found.push(current);
+
+          if (isDirectory(this.fs, current)) {
+            enqueueChildren(queue, current, allowHidden);
+          }
+        }
+      }
     }
 
-    return ShellArrayResult.from(Array.from(found).sort((left, right) => left.localeCompare(right)), this);
+    return ShellArrayResult.from(found.sort((left, right) => left.localeCompare(right)), this);
   }
 
   grep(...args: unknown[]): ShellString {
@@ -274,12 +304,16 @@ export class Shell {
       const fromStdin = pipe?.stdin;
 
       if (fromStdin !== undefined) {
-        const stdout = this.grepContent('(stdin)', fromStdin, matcher, options, false);
-        return this.success(stdout, stdout.length > 0 ? 0 : 1);
+        const result = this.grepContent('(stdin)', fromStdin, matcher, {
+          ...options,
+          maxCount: this.limitSearchCount(options.maxCount, options.maxCountTotal),
+        }, false);
+        return this.success(result.stdout, result.totalMatches > 0 ? 0 : 1);
       }
 
       const showFilenameDefault = targets.length > 1;
       const outputs: string[] = [];
+      let remainingTotal = options.maxCountTotal;
 
       for (const target of targets) {
         const content = this.fs.readFileSync(target);
@@ -287,10 +321,22 @@ export class Shell {
           continue;
         }
 
+        if (remainingTotal !== undefined && remainingTotal <= 0) {
+          break;
+        }
+
         const displayName = relativeDisplayPath(this.cwd, target);
-        const stdout = this.grepContent(displayName, decodeText(content), matcher, options, showFilenameDefault);
-        if (stdout.length > 0) {
-          outputs.push(stdout);
+        const effectiveOptions = {
+          ...options,
+          maxCount: this.limitSearchCount(options.maxCount, remainingTotal),
+        };
+        const result = this.grepContent(displayName, decodeText(content), matcher, effectiveOptions, showFilenameDefault);
+        if (result.stdout.length > 0) {
+          outputs.push(result.stdout);
+        }
+
+        if (remainingTotal !== undefined) {
+          remainingTotal -= result.totalMatches;
         }
       }
 
@@ -1749,6 +1795,64 @@ export class Shell {
     return { options, paths };
   }
 
+  private parseFindArgs(args: string[]): { options: ParsedFindOptions; paths: string[] } {
+    const options: ParsedFindOptions = { hidden: false, exclude: [] };
+    const paths: string[] = [];
+
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === '--hidden') {
+        options.hidden = true;
+        continue;
+      }
+      if (arg === '--exclude') {
+        options.exclude.push(String(args[index + 1]));
+        index += 1;
+        continue;
+      }
+      if (arg === '--max-results') {
+        options.maxResults = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (arg.startsWith('--exclude=')) {
+        options.exclude.push(arg.slice('--exclude='.length));
+        continue;
+      }
+      if (arg.startsWith('--max-results=')) {
+        options.maxResults = Number(arg.slice('--max-results='.length));
+        continue;
+      }
+      paths.push(arg);
+    }
+
+    if (options.maxResults !== undefined && (!Number.isInteger(options.maxResults) || options.maxResults < 1)) {
+      throw new Error('find: max-results must be a positive integer');
+    }
+
+    return { options, paths: paths.length === 0 ? ['.'] : paths };
+  }
+
+  private isHiddenSearchPath(value: string): boolean {
+    const normalized = value.startsWith('/') ? normalizeVirtualPath(value) : normalizeVirtualPath(`/${value}`);
+    return normalized
+      .split('/')
+      .filter(Boolean)
+      .some((segment) => segment !== '.' && segment !== '..' && segment.startsWith('.'));
+  }
+
+  private matchesSearchPatterns(patterns: string[], value: string): boolean {
+    return patterns.some((pattern) => matchesGlob(pattern, value) || matchesGlob(pattern, basename(value)));
+  }
+
+  private limitSearchCount(primary?: number, secondary?: number): number | undefined {
+    const limits = [primary, secondary].filter((value): value is number => value !== undefined);
+    if (limits.length === 0) {
+      return undefined;
+    }
+    return Math.min(...limits);
+  }
+
   private parseGrepArgs(args: unknown[]): { options: ParsedGrepOptions; pattern: string | RegExp; paths: string[] } {
     const options: ParsedGrepOptions = {
       invert: false,
@@ -1758,6 +1862,7 @@ export class Shell {
       recursive: false,
       countOnly: false,
       wordRegexp: false,
+      hidden: false,
       include: [],
       exclude: [],
       excludeDir: [],
@@ -1783,6 +1888,25 @@ export class Shell {
         continue;
       }
 
+      if (pattern === undefined && arg === '--hidden') {
+        options.hidden = true;
+        continue;
+      }
+      if (pattern === undefined && arg === '--exclude') {
+        options.exclude.push(String(args[index + 1]));
+        index += 1;
+        continue;
+      }
+      if (pattern === undefined && arg === '--exclude-dir') {
+        options.excludeDir.push(String(args[index + 1]));
+        index += 1;
+        continue;
+      }
+      if (pattern === undefined && arg === '--max-count-total') {
+        options.maxCountTotal = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
       if (pattern === undefined && typeof arg === 'string' && arg.startsWith('--include=')) {
         options.include.push(arg.slice('--include='.length));
         continue;
@@ -1793,6 +1917,10 @@ export class Shell {
       }
       if (pattern === undefined && typeof arg === 'string' && arg.startsWith('--exclude-dir=')) {
         options.excludeDir.push(arg.slice('--exclude-dir='.length));
+        continue;
+      }
+      if (pattern === undefined && typeof arg === 'string' && arg.startsWith('--max-count-total=')) {
+        options.maxCountTotal = Number(arg.slice('--max-count-total='.length));
         continue;
       }
       if (pattern === undefined && typeof arg === 'string' && arg.startsWith('-') && !(arg instanceof RegExp)) {
@@ -1834,6 +1962,12 @@ export class Shell {
     if (pattern === undefined) {
       throw new Error('grep: missing pattern');
     }
+    if (options.maxCount !== undefined && (!Number.isInteger(options.maxCount) || options.maxCount < 1)) {
+      throw new Error('grep: max count must be a positive integer');
+    }
+    if (options.maxCountTotal !== undefined && (!Number.isInteger(options.maxCountTotal) || options.maxCountTotal < 1)) {
+      throw new Error('grep: max-count-total must be a positive integer');
+    }
 
     return { options, pattern, paths: paths.length === 0 ? ['.'] : paths };
   }
@@ -1849,31 +1983,36 @@ export class Shell {
   private collectGrepTargets(paths: string[], options: ParsedGrepOptions): string[] {
     const results = new Set<string>();
 
-    const addPath = (absolutePath: string): void => {
+    const addPath = (absolutePath: string, allowHidden: boolean): void => {
       const relative = relativeDisplayPath(this.cwd, absolutePath);
+      if (!allowHidden && this.isHiddenSearchPath(relative)) {
+        return;
+      }
+
       const stat = this.fs.statSync(absolutePath);
       if (stat.isDirectory()) {
         if (!options.recursive) {
           return;
         }
-
-        const basenameValue = basename(absolutePath);
-        if (options.excludeDir.some((pattern) => matchesGlob(pattern, basenameValue) || matchesGlob(pattern, absolutePath))) {
+        if (this.matchesSearchPatterns(options.excludeDir, relative)) {
           return;
         }
 
         const entries = this.fs.readdirSync(absolutePath);
-        for (const entry of entries) {
-          const name = typeof entry === 'string' ? entry : entry.name;
-          addPath(normalizeVirtualPath(path.posix.join(absolutePath, name)));
+        const names = entries
+          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .sort((left, right) => left.localeCompare(right));
+
+        for (const name of names) {
+          addPath(normalizeVirtualPath(path.posix.join(absolutePath, name)), allowHidden);
         }
         return;
       }
 
-      if (options.include.length > 0 && !options.include.some((pattern) => matchesGlob(pattern, relative) || matchesGlob(pattern, basename(relative)))) {
+      if (options.include.length > 0 && !this.matchesSearchPatterns(options.include, relative)) {
         return;
       }
-      if (options.exclude.some((pattern) => matchesGlob(pattern, relative) || matchesGlob(pattern, basename(relative)))) {
+      if (this.matchesSearchPatterns(options.exclude, relative)) {
         return;
       }
 
@@ -1881,7 +2020,7 @@ export class Shell {
     };
 
     for (const input of paths) {
-      this.expandPaths(input).forEach((target) => addPath(target));
+      this.expandPaths(input).forEach((target) => addPath(target, options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, target))));
     }
 
     return Array.from(results).sort((left, right) => left.localeCompare(right));
@@ -1893,20 +2032,31 @@ export class Shell {
     matcher: RegExp,
     options: ParsedGrepOptions,
     showFilenameDefault: boolean,
-  ): string {
+  ): { stdout: string; totalMatches: number } {
     const lines = splitLines(content);
     const groups: Array<{ start: number; end: number; matches: Array<{ lineIndex: number; matches: string[] }> }> = [];
     let totalMatches = 0;
 
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]!;
-      const matches = Array.from(line.matchAll(matcher)).map((match) => match[0]);
-      const isMatch = options.invert ? matches.length === 0 : matches.length > 0;
+      const rawMatches = Array.from(line.matchAll(matcher)).map((match) => match[0]);
+      const isMatch = options.invert ? rawMatches.length === 0 : rawMatches.length > 0;
       if (!isMatch) {
         continue;
       }
 
-      totalMatches += options.onlyMatching && !options.invert ? matches.length : 1;
+      const remaining = options.maxCount === undefined ? Number.POSITIVE_INFINITY : options.maxCount - totalMatches;
+      if (remaining <= 0) {
+        break;
+      }
+
+      const matches = options.onlyMatching && !options.invert ? rawMatches.slice(0, remaining) : rawMatches;
+      const contribution = options.filesWithMatches ? 1 : options.onlyMatching && !options.invert ? matches.length : 1;
+      if (contribution <= 0) {
+        break;
+      }
+
+      totalMatches += contribution;
       const start = Math.max(0, index - options.before);
       const end = Math.min(lines.length - 1, index + options.after);
       const last = groups.at(-1);
@@ -1917,20 +2067,23 @@ export class Shell {
         groups.push({ start, end, matches: [{ lineIndex: index, matches }] });
       }
 
-      if (options.maxCount !== undefined && totalMatches >= options.maxCount) {
+      if (options.filesWithMatches || (options.maxCount !== undefined && totalMatches >= options.maxCount)) {
         break;
       }
     }
 
     if (totalMatches === 0) {
-      return '';
+      return { stdout: '', totalMatches: 0 };
     }
     if (options.filesWithMatches) {
-      return displayName;
+      return { stdout: displayName, totalMatches };
     }
     if (options.countOnly) {
       const showFilename = options.withFilename ?? showFilenameDefault;
-      return `${showFilename && displayName ? `${displayName}:` : ''}${totalMatches}`;
+      return {
+        stdout: `${showFilename && displayName ? `${displayName}:` : ''}${totalMatches}`,
+        totalMatches,
+      };
     }
 
     const showFilename = options.withFilename ?? showFilenameDefault;
@@ -1965,7 +2118,7 @@ export class Shell {
       }
     }
 
-    return outputLines.join('\n');
+    return { stdout: outputLines.join('\n'), totalMatches };
   }
 
   private sortKey(line: string, key?: number, separator?: string): string {
