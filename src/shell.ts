@@ -220,13 +220,9 @@ export class Shell {
           }
           return true;
         });
-      if (files.length === 0) {
-        const content = pipe?.stdin ?? '';
-        return this.success(numberLines ? this.numberLines(content) : content);
-      }
 
-      const parts = files.flatMap((input) => this.expandPaths(String(input))).map((target) => readTextFile(this.fs, target));
-      const content = parts.join('');
+      this.ensureNoMixedInput('cat', pipe, files);
+      const content = pipe?.stdin ?? (files.length === 0 ? '' : this.readInputs('cat', files));
       return this.success(numberLines ? this.numberLines(content) : content);
     } catch (error) {
       return this.fail(this.errorMessage(error));
@@ -234,34 +230,30 @@ export class Shell {
   }
 
   find(...args: string[]): ShellArrayResult<string> {
-    const { options, paths } = this.parseFindArgs(args);
-    const found: string[] = [];
-    const seen = new Set<string>();
+    try {
+      const { options, paths } = this.parseFindArgs(args);
+      const roots = this.expandCommandPaths('find', paths);
+      const found: string[] = [];
+      const seen = new Set<string>();
 
-    const enqueueChildren = (queue: Array<{ path: string; allowHidden: boolean }>, current: string, allowHidden: boolean): void => {
-      const entries = this.fs.readdirSync(current);
-      const names = entries
-        .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
-        .sort((left, right) => left.localeCompare(right));
+      const enqueueChildren = (queue: Array<{ path: string; allowHidden: boolean }>, current: string, allowHidden: boolean): void => {
+        const entries = this.fs.readdirSync(current);
+        const names = entries
+          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .sort((left, right) => left.localeCompare(right));
 
-      for (const name of names) {
-        queue.push({
-          path: normalizeVirtualPath(path.posix.join(current, name)),
-          allowHidden,
-        });
-      }
-    };
-
-    for (const input of paths) {
-      const matches = this.expandPaths(input);
-      for (const match of matches) {
-        if (!this.fs.existsSync(match)) {
-          continue;
+        for (const name of names) {
+          queue.push({
+            path: normalizeVirtualPath(path.posix.join(current, name)),
+            allowHidden,
+          });
         }
+      };
 
+      for (const root of roots) {
         const queue = [{
-          path: match,
-          allowHidden: options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, match)),
+          path: root,
+          allowHidden: options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, root)),
         }];
 
         while (queue.length > 0) {
@@ -290,17 +282,19 @@ export class Shell {
           }
         }
       }
-    }
 
-    return ShellArrayResult.from(found.sort((left, right) => left.localeCompare(right)), this);
+      return ShellArrayResult.from(found.sort((left, right) => left.localeCompare(right)), this);
+    } catch (error) {
+      return ShellArrayResult.from([], this, { code: 1, stderr: this.errorMessage(error) });
+    }
   }
 
   grep(...args: unknown[]): ShellString {
     try {
       const pipe = this.extractPipeInput(args);
       const { options, pattern, paths } = this.parseGrepArgs(args.filter((value) => !isPipeInput(value)));
+      this.ensureNoMixedInput('grep', pipe, paths);
       const matcher = this.createMatcher(pattern, options);
-      const targets = this.collectGrepTargets(paths, options);
       const fromStdin = pipe?.stdin;
 
       if (fromStdin !== undefined) {
@@ -311,6 +305,7 @@ export class Shell {
         return this.success(result.stdout, result.totalMatches > 0 ? 0 : 1);
       }
 
+      const targets = this.collectGrepTargets(paths.length === 0 ? ['.'] : paths, options);
       const showFilenameDefault = targets.length > 1;
       const outputs: string[] = [];
       let remainingTotal = options.maxCountTotal;
@@ -348,44 +343,61 @@ export class Shell {
   }
 
   sed(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    let inPlace = false;
-    if (args[0] === '-i') {
-      inPlace = true;
-      args.shift();
-    }
-
-    const [search, replacement, ...pathArgs] = args.filter((value) => !isPipeInput(value)) as [
-      string | RegExp,
-      string | ((substring: string, ...captures: string[]) => string),
-      ...string[],
-    ];
-
-    const apply = (content: string): string => {
-      const normalizedSearch =
-        typeof search === 'string' ? new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) : search;
-      return content
-        .replace(/\r\n/g, '\n')
-        .split('\n')
-        .map((line) => line.replace(normalizedSearch, replacement as never))
-        .join('\n');
-    };
-
-    if (pipe?.stdin !== undefined) {
-      return this.success(apply(pipe.stdin));
-    }
-
-    const outputs: string[] = [];
-    for (const input of pathArgs.flatMap((value) => this.expandPaths(value))) {
-      const source = readTextFile(this.fs, input);
-      const updated = apply(source);
-      outputs.push(updated);
-      if (inPlace) {
-        writeTextFile(this.fs, input, updated);
+    try {
+      const pipe = this.extractPipeInput(args);
+      let inPlace = false;
+      if (args[0] === '-i') {
+        inPlace = true;
+        args = args.slice(1);
       }
-    }
 
-    return this.success(outputs.join('\n'));
+      const [search, replacement, ...pathArgs] = args.filter((value) => !isPipeInput(value)) as [
+        string | RegExp,
+        string | ((substring: string, ...captures: string[]) => string),
+        ...string[],
+      ];
+
+      if (search === undefined || replacement === undefined) {
+        throw new Error('sed: expected search and replacement');
+      }
+
+      this.ensureNoMixedInput('sed', pipe, pathArgs);
+      if (pipe?.stdin !== undefined && inPlace) {
+        throw new Error('sed: cannot use -i with stdin');
+      }
+      if (pipe?.stdin === undefined && pathArgs.length === 0) {
+        throw new Error('sed: expected file paths or stdin');
+      }
+
+      const apply = (content: string): string => {
+        const normalizedSearch =
+          typeof search === 'string' ? new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) : search;
+        return content
+          .replace(/\r\n/g, '\n')
+          .split('\n')
+          .map((line) => line.replace(normalizedSearch, replacement as never))
+          .join('\n');
+      };
+
+      if (pipe?.stdin !== undefined) {
+        return this.success(apply(pipe.stdin));
+      }
+
+      const updates = this.expandCommandPaths('sed', pathArgs).map((target) => {
+        const { source } = this.readCommandTextFile(target, 'sed');
+        return { target, updated: apply(source) };
+      });
+
+      if (inPlace) {
+        for (const update of updates) {
+          writeTextFile(this.fs, update.target, update.updated);
+        }
+      }
+
+      return this.success(updates.map((update) => update.updated).join('\n'));
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   replace(...args: unknown[]): ShellString {
@@ -424,18 +436,14 @@ export class Shell {
   show(...args: unknown[]): ShellString {
     try {
       const { options, targetPath } = this.parseShowArgs(args);
-      const raw = this.fs.readFileSync(targetPath);
-      if (looksBinary(raw)) {
-        throw new Error(`show: binary file not supported: ${relativeDisplayPath(this.cwd, targetPath)}`);
-      }
-
-      const source = decodeText(raw).replace(/\r\n/g, '\n');
-      const lines = splitLines(source);
+      const { source, label } = this.readCommandTextFile(targetPath, 'show');
+      const normalized = source.replace(/\r\n/g, '\n');
+      const lines = splitLines(normalized);
       if (lines.length === 0) {
-        throw new Error(`show: file is empty: ${relativeDisplayPath(this.cwd, targetPath)}`);
+        throw new Error(`show: file is empty: ${label}`);
       }
 
-      const range = this.resolveShowRange(source, lines, options, relativeDisplayPath(this.cwd, targetPath));
+      const range = this.resolveShowRange(normalized, lines, options, label);
       const selected = lines.slice(range.startLine - 1, range.endLine);
       const output = selected
         .map((line, index) => {
@@ -451,240 +459,278 @@ export class Shell {
   }
 
   head(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const { options, paths } = this.parseHeadTailArgs(args.filter((value) => !isPipeInput(value)), 10);
-    const source = pipe?.stdin ?? this.readInputs(paths);
-    const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, paths } = this.parseHeadTailArgs(args.filter((value) => !isPipeInput(value)), 10);
+      this.ensureNoMixedInput('head', pipe, paths);
+      const source = pipe?.stdin ?? this.readInputs('head', paths);
+      const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
 
-    let selected = lines;
-    if (options.count >= 0) {
-      selected = lines.slice(0, options.count);
-    } else {
-      selected = lines.slice(0, Math.max(0, lines.length + options.count));
+      let selected = lines;
+      if (options.count >= 0) {
+        selected = lines.slice(0, options.count);
+      } else {
+        selected = lines.slice(0, Math.max(0, lines.length + options.count));
+      }
+
+      return this.success(joinLines(selected, trailingNewline && selected.length === lines.length));
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    return this.success(joinLines(selected, trailingNewline && selected.length === lines.length));
   }
 
   tail(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const { options, paths } = this.parseHeadTailArgs(args.filter((value) => !isPipeInput(value)), 10);
-    const source = pipe?.stdin ?? this.readInputs(paths);
-    const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, paths } = this.parseHeadTailArgs(args.filter((value) => !isPipeInput(value)), 10);
+      this.ensureNoMixedInput('tail', pipe, paths);
+      const source = pipe?.stdin ?? this.readInputs('tail', paths);
+      const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
 
-    let selected = lines;
-    if (options.fromStart) {
-      selected = lines.slice(Math.max(0, options.count - 1));
-    } else if (options.count >= 0) {
-      selected = lines.slice(Math.max(0, lines.length - options.count));
-    } else {
-      selected = lines.slice(Math.min(lines.length, Math.abs(options.count)));
+      let selected = lines;
+      if (options.fromStart) {
+        selected = lines.slice(Math.max(0, options.count - 1));
+      } else if (options.count >= 0) {
+        selected = lines.slice(Math.max(0, lines.length - options.count));
+      } else {
+        selected = lines.slice(Math.min(lines.length, Math.abs(options.count)));
+      }
+
+      return this.success(joinLines(selected, trailingNewline));
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    return this.success(joinLines(selected, trailingNewline));
   }
 
   sort(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const { options, paths } = this.parseSortArgs(args.filter((value) => !isPipeInput(value)));
-    let lines = splitLines(pipe?.stdin ?? this.readInputs(paths));
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, paths } = this.parseSortArgs(args.filter((value) => !isPipeInput(value)));
+      this.ensureNoMixedInput('sort', pipe, paths);
+      let lines = splitLines(pipe?.stdin ?? this.readInputs('sort', paths));
 
-    lines.sort((left, right) => {
-      const leftKey = this.sortKey(left, options.key, options.separator);
-      const rightKey = this.sortKey(right, options.key, options.separator);
-      const order = options.numeric ? Number.parseFloat(leftKey) - Number.parseFloat(rightKey) : leftKey.localeCompare(rightKey);
-      return Number.isNaN(order) ? 0 : order;
-    });
+      lines.sort((left, right) => {
+        const leftKey = this.sortKey(left, options.key, options.separator);
+        const rightKey = this.sortKey(right, options.key, options.separator);
+        const order = options.numeric ? Number.parseFloat(leftKey) - Number.parseFloat(rightKey) : leftKey.localeCompare(rightKey);
+        return Number.isNaN(order) ? 0 : order;
+      });
 
-    if (options.reverse) {
-      lines.reverse();
+      if (options.reverse) {
+        lines.reverse();
+      }
+      if (options.unique) {
+        lines = lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
+      }
+
+      return this.success(lines.join('\n'));
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-    if (options.unique) {
-      lines = lines.filter((line, index) => index === 0 || line !== lines[index - 1]);
-    }
-
-    return this.success(lines.join('\n'));
   }
 
   uniq(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const { options, paths } = this.parseUniqArgs(args.filter((value) => !isPipeInput(value)));
-    const lines = splitLines(pipe?.stdin ?? this.readInputs(paths));
-    const groups: Array<{ value: string; count: number }> = [];
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, paths } = this.parseUniqArgs(args.filter((value) => !isPipeInput(value)));
+      this.ensureNoMixedInput('uniq', pipe, paths);
+      const lines = splitLines(pipe?.stdin ?? this.readInputs('uniq', paths));
+      const groups: Array<{ value: string; count: number }> = [];
 
-    for (const line of lines) {
-      const key = options.ignoreCase ? line.toLowerCase() : line;
-      const last = groups.at(-1);
-      if (last && (options.ignoreCase ? last.value.toLowerCase() : last.value) === key) {
-        last.count += 1;
-      } else {
-        groups.push({ value: line, count: 1 });
+      for (const line of lines) {
+        const key = options.ignoreCase ? line.toLowerCase() : line;
+        const last = groups.at(-1);
+        if (last && (options.ignoreCase ? last.value.toLowerCase() : last.value) === key) {
+          last.count += 1;
+        } else {
+          groups.push({ value: line, count: 1 });
+        }
       }
+
+      const output = groups
+        .filter((group) => !options.duplicatesOnly || group.count > 1)
+        .map((group) => (options.count ? `${String(group.count).padStart(7, ' ')} ${group.value}` : group.value))
+        .join('\n');
+
+      return this.success(output);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    const output = groups
-      .filter((group) => !options.duplicatesOnly || group.count > 1)
-      .map((group) => (options.count ? `${String(group.count).padStart(7, ' ')} ${group.value}` : group.value))
-      .join('\n');
-
-    return this.success(output);
   }
 
   wc(...args: unknown[]): ShellString {
-    const pipe = this.extractPipeInput(args);
-    const flags = new Set<string>();
-    const paths: string[] = [];
+    try {
+      const pipe = this.extractPipeInput(args);
+      const flags = new Set<string>();
+      const paths: string[] = [];
 
-    for (const arg of args.filter((value) => !isPipeInput(value))) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        paths.push(arg);
+      for (const arg of args.filter((value) => !isPipeInput(value))) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          paths.push(arg);
+        }
       }
+
+      this.ensureNoMixedInput('wc', pipe, paths);
+      const entries =
+        pipe?.stdin !== undefined
+          ? [{ label: '', content: pipe.stdin }]
+          : this.expandCommandPaths('wc', paths).map((target) => ({
+              label: relativeDisplayPath(this.cwd, target),
+              content: this.readCommandTextFile(target, 'wc').source,
+            }));
+
+      const counts = entries.map((entry) => this.wcCounts(entry.content, entry.label));
+      const display = (count: ReturnType<Shell['wcCounts']>): string => {
+        const selected: string[] = [];
+        if (flags.size === 0 || flags.has('-l')) {
+          selected.push(String(count.lines).padStart(7, ' '));
+        }
+        if (flags.size === 0 || flags.has('-w')) {
+          selected.push(String(count.words).padStart(7, ' '));
+        }
+        if (flags.size === 0 || flags.has('-c')) {
+          selected.push(String(count.bytes).padStart(7, ' '));
+        }
+        if (flags.has('-m')) {
+          selected.push(String(count.characters).padStart(7, ' '));
+        }
+        return `${selected.join(' ')}${count.label ? ` ${count.label}` : ''}`;
+      };
+
+      const lines = counts.map(display);
+      if (counts.length > 1) {
+        const total = counts.reduce(
+          (acc, entry) => ({
+            label: 'total',
+            lines: acc.lines + entry.lines,
+            words: acc.words + entry.words,
+            bytes: acc.bytes + entry.bytes,
+            characters: acc.characters + entry.characters,
+          }),
+          { label: 'total', lines: 0, words: 0, bytes: 0, characters: 0 },
+        );
+        lines.push(display(total));
+      }
+
+      return this.success(lines.join('\n'));
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    const entries =
-      pipe?.stdin !== undefined
-        ? [{ label: '', content: pipe.stdin }]
-        : paths.flatMap((input) => this.expandPaths(input)).map((target) => ({
-            label: relativeDisplayPath(this.cwd, target),
-            content: readTextFile(this.fs, target),
-          }));
-
-    const counts = entries.map((entry) => this.wcCounts(entry.content, entry.label));
-    const display = (count: ReturnType<Shell['wcCounts']>): string => {
-      const selected: string[] = [];
-      if (flags.size === 0 || flags.has('-l')) {
-        selected.push(String(count.lines).padStart(7, ' '));
-      }
-      if (flags.size === 0 || flags.has('-w')) {
-        selected.push(String(count.words).padStart(7, ' '));
-      }
-      if (flags.size === 0 || flags.has('-c')) {
-        selected.push(String(count.bytes).padStart(7, ' '));
-      }
-      if (flags.has('-m')) {
-        selected.push(String(count.characters).padStart(7, ' '));
-      }
-      return `${selected.join(' ')}${count.label ? ` ${count.label}` : ''}`;
-    };
-
-    const lines = counts.map(display);
-    if (counts.length > 1) {
-      const total = counts.reduce(
-        (acc, entry) => ({
-          label: 'total',
-          lines: acc.lines + entry.lines,
-          words: acc.words + entry.words,
-          bytes: acc.bytes + entry.bytes,
-          characters: acc.characters + entry.characters,
-        }),
-        { label: 'total', lines: 0, words: 0, bytes: 0, characters: 0 },
-      );
-      lines.push(display(total));
-    }
-
-    return this.success(lines.join('\n'));
   }
 
   cp(...args: unknown[]): ShellString {
-    const flags = new Set<string>();
-    const inputs: string[] = [];
+    try {
+      const flags = new Set<string>();
+      const inputs: string[] = [];
 
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        inputs.push(arg);
-      }
-    }
-
-    if (inputs.length < 2) {
-      return this.fail('cp: expected source and destination');
-    }
-
-    const destination = this.resolvePath(inputs.at(-1)!);
-    const sources = inputs.slice(0, -1).flatMap((input) => this.expandPaths(input));
-    const recursive = flags.has('-r') || flags.has('-R');
-    const noOverwrite = flags.has('-n');
-    const destinationIsDirectory = sources.length > 1 || (this.fs.existsSync(destination) && isDirectory(this.fs, destination));
-
-    for (const source of sources) {
-      const sourceStat = this.fs.statSync(source);
-      if (sourceStat.isDirectory() && !recursive) {
-        return this.fail(`cp: omitting directory '${relativeDisplayPath(this.cwd, source)}'`);
+      for (const arg of args) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          inputs.push(arg);
+        }
       }
 
-      const target = destinationIsDirectory
-        ? normalizeVirtualPath(path.posix.join(destination, basenameVirtualPath(source)))
-        : destination;
-      this.copyNode(source, target, { noOverwrite, recursive });
-    }
+      if (inputs.length < 2) {
+        return this.fail('cp: expected source and destination');
+      }
 
-    return this.success('');
+      const destination = this.resolvePath(inputs.at(-1)!);
+      const sources = this.expandCommandPaths('cp', inputs.slice(0, -1));
+      const recursive = flags.has('-r') || flags.has('-R');
+      const noOverwrite = flags.has('-n');
+      const destinationIsDirectory = sources.length > 1 || (this.fs.existsSync(destination) && isDirectory(this.fs, destination));
+
+      for (const source of sources) {
+        const sourceStat = this.fs.statSync(source);
+        if (sourceStat.isDirectory() && !recursive) {
+          return this.fail(`cp: omitting directory '${relativeDisplayPath(this.cwd, source)}'`);
+        }
+
+        const target = destinationIsDirectory
+          ? normalizeVirtualPath(path.posix.join(destination, basenameVirtualPath(source)))
+          : destination;
+        this.copyNode(source, target, { noOverwrite, recursive });
+      }
+
+      return this.success('');
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   mv(...args: unknown[]): ShellString {
-    const flags = new Set<string>();
-    const inputs: string[] = [];
+    try {
+      const flags = new Set<string>();
+      const inputs: string[] = [];
 
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        inputs.push(arg);
-      }
-    }
-
-    if (inputs.length < 2) {
-      return this.fail('mv: expected source and destination');
-    }
-
-    const destination = this.resolvePath(inputs.at(-1)!);
-    const sources = inputs.slice(0, -1).flatMap((input) => this.expandPaths(input));
-    const noOverwrite = flags.has('-n');
-    const destinationIsDirectory = sources.length > 1 || (this.fs.existsSync(destination) && isDirectory(this.fs, destination));
-
-    for (const source of sources) {
-      const target = destinationIsDirectory
-        ? normalizeVirtualPath(path.posix.join(destination, basenameVirtualPath(source)))
-        : destination;
-      if (noOverwrite && this.fs.existsSync(target)) {
-        continue;
+      for (const arg of args) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          inputs.push(arg);
+        }
       }
 
-      try {
-        ensureParentDir(this.fs, target);
-        this.fs.renameSync(source, target);
-      } catch {
-        this.copyNode(source, target, { noOverwrite, recursive: true });
-        this.removeNode(source, true, true);
+      if (inputs.length < 2) {
+        return this.fail('mv: expected source and destination');
       }
-    }
 
-    return this.success('');
+      const destination = this.resolvePath(inputs.at(-1)!);
+      const sources = this.expandCommandPaths('mv', inputs.slice(0, -1));
+      const noOverwrite = flags.has('-n');
+      const destinationIsDirectory = sources.length > 1 || (this.fs.existsSync(destination) && isDirectory(this.fs, destination));
+
+      for (const source of sources) {
+        const target = destinationIsDirectory
+          ? normalizeVirtualPath(path.posix.join(destination, basenameVirtualPath(source)))
+          : destination;
+        if (noOverwrite && this.fs.existsSync(target)) {
+          continue;
+        }
+
+        try {
+          ensureParentDir(this.fs, target);
+          this.fs.renameSync(source, target);
+        } catch {
+          this.copyNode(source, target, { noOverwrite, recursive: true });
+          this.removeNode(source, true, true);
+        }
+      }
+
+      return this.success('');
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   rm(...args: unknown[]): ShellString {
-    const flags = new Set<string>();
-    const paths: string[] = [];
+    try {
+      const flags = new Set<string>();
+      const paths: string[] = [];
 
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        paths.push(arg);
+      for (const arg of args) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          paths.push(arg);
+        }
       }
+
+      const recursive = flags.has('-r') || flags.has('-R');
+      const force = flags.has('-f');
+      const targets = this.expandCommandPaths('rm', paths, { allowMissing: force });
+
+      for (const target of targets) {
+        this.removeNode(target, recursive, force);
+      }
+
+      return this.success('');
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    const recursive = flags.has('-r') || flags.has('-R');
-    const force = flags.has('-f');
-
-    for (const target of paths.flatMap((value) => this.expandPaths(value))) {
-      this.removeNode(target, recursive, force);
-    }
-
-    return this.success('');
   }
 
   mkdir(...args: unknown[]): ShellString {
@@ -735,93 +781,105 @@ export class Shell {
   }
 
   ln(...args: unknown[]): ShellString {
-    const flags = new Set<string>();
-    const inputs: string[] = [];
+    try {
+      const flags = new Set<string>();
+      const inputs: string[] = [];
 
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        inputs.push(arg);
+      for (const arg of args) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          inputs.push(arg);
+        }
       }
-    }
 
-    if (inputs.length !== 2) {
-      return this.fail('ln: expected source and destination');
-    }
-
-    const source = this.resolvePath(inputs[0]!);
-    const destination = this.resolvePath(inputs[1]!);
-    if (flags.has('-f') && this.fs.existsSync(destination)) {
-      this.removeNode(destination, true, true);
-    }
-
-    ensureParentDir(this.fs, destination);
-    if (flags.has('-s')) {
-      if (!this.fs.symlinkSync) {
-        return this.fail('ln: symbolic links are not supported by this filesystem');
+      if (inputs.length !== 2) {
+        return this.fail('ln: expected source and destination');
       }
-      this.fs.symlinkSync(source, destination);
+
+      const source = this.expandCommandPaths('ln', [inputs[0]!])[0]!;
+      const destination = this.resolvePath(inputs[1]!);
+      if (flags.has('-f') && this.fs.existsSync(destination)) {
+        this.removeNode(destination, true, true);
+      }
+
+      ensureParentDir(this.fs, destination);
+      if (flags.has('-s')) {
+        if (!this.fs.symlinkSync) {
+          return this.fail('ln: symbolic links are not supported by this filesystem');
+        }
+        this.fs.symlinkSync(source, destination);
+        return this.success('');
+      }
+
+      this.copyNode(source, destination, { noOverwrite: false, recursive: true });
       return this.success('');
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    this.copyNode(source, destination, { noOverwrite: false, recursive: true });
-    return this.success('');
   }
 
   chmod(mode: string | number, ...paths: string[]): ShellString {
-    if (!this.fs.chmodSync) {
-      return this.fail('chmod: filesystem does not support chmod');
+    try {
+      if (!this.fs.chmodSync) {
+        return this.fail('chmod: filesystem does not support chmod');
+      }
+      const parsed = parseMode(mode);
+      for (const target of this.expandCommandPaths('chmod', paths)) {
+        this.fs.chmodSync(target, parsed);
+      }
+      return this.success('');
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-    const parsed = parseMode(mode);
-    for (const target of paths.flatMap((input) => this.expandPaths(input))) {
-      this.fs.chmodSync(target, parsed);
-    }
-    return this.success('');
   }
 
   ls(...args: unknown[]): ShellArrayResult<string | LongListEntry> {
-    const flags = new Set<string>();
-    const inputs: string[] = [];
+    try {
+      const flags = new Set<string>();
+      const inputs: string[] = [];
 
-    for (const arg of args) {
-      if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
-        parseShortFlags(arg).forEach((flag) => flags.add(flag));
-      } else if (typeof arg === 'string') {
-        inputs.push(arg);
+      for (const arg of args) {
+        if (typeof arg === 'string' && arg.startsWith('-') && arg.length > 1) {
+          parseShortFlags(arg).forEach((flag) => flags.add(flag));
+        } else if (typeof arg === 'string') {
+          inputs.push(arg);
+        }
       }
+
+      const recursive = flags.has('-R');
+      const all = flags.has('-A');
+      const long = flags.has('-l');
+      const listDirs = flags.has('-d');
+      const targets = this.expandCommandPaths('ls', inputs.length === 0 ? ['.'] : inputs);
+      const results: Array<string | LongListEntry> = [];
+
+      const listPath = (target: string): void => {
+        const stat = this.fs.statSync(target);
+        if (!stat.isDirectory() || listDirs) {
+          results.push(long ? this.longEntry(target) : relativeDisplayPath(this.cwd, target));
+          return;
+        }
+
+        const entries = this.fs.readdirSync(target);
+        for (const entry of entries) {
+          const name = typeof entry === 'string' ? entry : entry.name;
+          if (!all && name.startsWith('.')) {
+            continue;
+          }
+          const child = normalizeVirtualPath(path.posix.join(target, name));
+          results.push(long ? this.longEntry(child) : relativeDisplayPath(this.cwd, child));
+          if (recursive && isDirectory(this.fs, child)) {
+            listPath(child);
+          }
+        }
+      };
+
+      targets.forEach((target) => listPath(target));
+      return ShellArrayResult.from(results, this);
+    } catch (error) {
+      return ShellArrayResult.from([], this, { code: 1, stderr: this.errorMessage(error) });
     }
-
-    const recursive = flags.has('-R');
-    const all = flags.has('-A');
-    const long = flags.has('-l');
-    const listDirs = flags.has('-d');
-    const targets = (inputs.length === 0 ? ['.'] : inputs).flatMap((input) => this.expandPaths(input));
-    const results: Array<string | LongListEntry> = [];
-
-    const listPath = (target: string): void => {
-      const stat = this.fs.statSync(target);
-      if (!stat.isDirectory() || listDirs) {
-        results.push(long ? this.longEntry(target) : relativeDisplayPath(this.cwd, target));
-        return;
-      }
-
-      const entries = this.fs.readdirSync(target);
-      for (const entry of entries) {
-        const name = typeof entry === 'string' ? entry : entry.name;
-        if (!all && name.startsWith('.')) {
-          continue;
-        }
-        const child = normalizeVirtualPath(path.posix.join(target, name));
-        results.push(long ? this.longEntry(child) : relativeDisplayPath(this.cwd, child));
-        if (recursive && isDirectory(this.fs, child)) {
-          listPath(child);
-        }
-      }
-    };
-
-    targets.forEach((target) => listPath(target));
-    return ShellArrayResult.from(results, this);
   }
 
   patch(...args: unknown[]): ShellString {
@@ -907,31 +965,35 @@ export class Shell {
   }
 
   splice(...args: unknown[]): ShellString {
-    let dryRun = false;
-    if (args[0] === '-d') {
-      dryRun = true;
-      args.shift();
+    try {
+      let dryRun = false;
+      if (args[0] === '-d') {
+        dryRun = true;
+        args = args.slice(1);
+      }
+
+      const [file, startLine, deleteCount, ...insertLines] = args as [string, number, number, ...string[]];
+      const target = this.resolvePath(file);
+      const { source } = this.readCommandTextFile(target, 'splice');
+      const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
+      const startIndex = startLine - 1;
+
+      if (startIndex < 0 || startIndex > lines.length) {
+        return this.fail(`splice: start line out of bounds: ${startLine}`);
+      }
+
+      const updated = [...lines];
+      updated.splice(startIndex, deleteCount, ...insertLines);
+      const output = joinLines(updated, trailingNewline || insertLines.length > 0);
+
+      if (!dryRun) {
+        writeTextFile(this.fs, target, output);
+      }
+
+      return this.success(output);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    const [file, startLine, deleteCount, ...insertLines] = args as [string, number, number, ...string[]];
-    const target = this.resolvePath(file);
-    const source = readTextFile(this.fs, target);
-    const { lines, trailingNewline } = splitContentAndTrailingNewline(source);
-    const startIndex = startLine - 1;
-
-    if (startIndex < 0 || startIndex > lines.length) {
-      return this.fail(`splice: start line out of bounds: ${startLine}`);
-    }
-
-    const updated = [...lines];
-    updated.splice(startIndex, deleteCount, ...insertLines);
-    const output = joinLines(updated, trailingNewline || insertLines.length > 0);
-
-    if (!dryRun) {
-      writeTextFile(this.fs, target, output);
-    }
-
-    return this.success(output);
   }
 
   which(commandName: string): ShellString {
@@ -948,11 +1010,18 @@ export class Shell {
   }
 
   realpath(target: string): ShellString {
-    const resolved = this.resolvePath(target);
-    if (this.fs.realpathSync) {
-      return this.success(normalizeVirtualPath(decodeText(this.fs.realpathSync(resolved))));
+    try {
+      const resolved = this.resolvePath(target);
+      if (!safeStat(this.fs, resolved, false)) {
+        return this.fail(`realpath: no such file or directory: ${relativeDisplayPath(this.cwd, resolved)}`);
+      }
+      if (this.fs.realpathSync) {
+        return this.success(normalizeVirtualPath(decodeText(this.fs.realpathSync(resolved))));
+      }
+      return this.success(resolved);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-    return this.success(resolved);
   }
 
   dirname(target: string): ShellString {
@@ -1529,15 +1598,7 @@ export class Shell {
       return { source: pipe?.stdin ?? '', label: '(stdin)' };
     }
 
-    const raw = this.fs.readFileSync(targetPath);
-    if (looksBinary(raw)) {
-      throw new Error(`${command}: binary file not supported: ${relativeDisplayPath(this.cwd, targetPath)}`);
-    }
-
-    return {
-      source: decodeText(raw),
-      label: relativeDisplayPath(this.cwd, targetPath),
-    };
+    return this.readCommandTextFile(targetPath, command);
   }
 
   private applyReplace(
@@ -1655,6 +1716,60 @@ export class Shell {
     return new RegExp(pattern.source, flags);
   }
 
+  private isGlobPattern(value: string): boolean {
+    return /[*?{]/.test(value);
+  }
+
+  private expandCommandPaths(command: string, inputs: string[], options: { allowMissing?: boolean } = {}): string[] {
+    const resolved: string[] = [];
+
+    for (const input of inputs) {
+      const matches = this.expandPaths(input);
+      if (matches.length === 0) {
+        if (this.isGlobPattern(input) || options.allowMissing) {
+          continue;
+        }
+        throw new Error(`${command}: no such file or directory: ${relativeDisplayPath(this.cwd, this.resolvePath(input))}`);
+      }
+
+      for (const match of matches) {
+        if (!safeStat(this.fs, match, false)) {
+          if (options.allowMissing) {
+            continue;
+          }
+          throw new Error(`${command}: no such file or directory: ${relativeDisplayPath(this.cwd, match)}`);
+        }
+        resolved.push(match);
+      }
+    }
+
+    return resolved;
+  }
+
+  private readCommandTextFile(target: string, command: string): { source: string; label: string } {
+    const label = relativeDisplayPath(this.cwd, target);
+    const stat = safeStat(this.fs, target, false);
+    if (!stat) {
+      throw new Error(`${command}: no such file or directory: ${label}`);
+    }
+    if (!stat.isFile()) {
+      throw new Error(`${command}: not a file: ${label}`);
+    }
+
+    const raw = this.fs.readFileSync(target);
+    if (looksBinary(raw)) {
+      throw new Error(`${command}: binary file not supported: ${label}`);
+    }
+
+    return { source: decodeText(raw), label };
+  }
+
+  private ensureNoMixedInput(command: string, pipe: PipeInput | undefined, paths: string[]): void {
+    if (pipe?.stdin !== undefined && paths.length > 0) {
+      throw new Error(`${command}: provide either stdin or file paths, not both`);
+    }
+  }
+
   private extractPipeInput(args: unknown[]): PipeInput | undefined {
     const last = args.at(-1);
     return isPipeInput(last) ? last : undefined;
@@ -1673,11 +1788,11 @@ export class Shell {
   }
 
   private expandPaths(value: string): string[] {
-    return /[*?{]/.test(value) ? expandGlob(this.fs, this.cwd, value) : [this.resolvePath(value)];
+    return this.isGlobPattern(value) ? expandGlob(this.fs, this.cwd, value) : [this.resolvePath(value)];
   }
 
-  private readInputs(paths: string[]): string {
-    return paths.flatMap((input) => this.expandPaths(input)).map((target) => readTextFile(this.fs, target)).join('');
+  private readInputs(command: string, paths: string[]): string {
+    return this.expandCommandPaths(command, paths).map((target) => this.readCommandTextFile(target, command).source).join('');
   }
 
   private parseHeadTailArgs(args: unknown[], defaultCount: number): { options: ParsedHeadTailOptions; paths: string[] } {
@@ -1969,7 +2084,7 @@ export class Shell {
       throw new Error('grep: max-count-total must be a positive integer');
     }
 
-    return { options, pattern, paths: paths.length === 0 ? ['.'] : paths };
+    return { options, pattern, paths };
   }
 
   private createMatcher(pattern: string | RegExp, options: ParsedGrepOptions): RegExp {
@@ -2020,7 +2135,7 @@ export class Shell {
     };
 
     for (const input of paths) {
-      this.expandPaths(input).forEach((target) => addPath(target, options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, target))));
+      this.expandCommandPaths('grep', [input]).forEach((target) => addPath(target, options.hidden || this.isHiddenSearchPath(relativeDisplayPath(this.cwd, target))));
     }
 
     return Array.from(results).sort((left, right) => left.localeCompare(right));

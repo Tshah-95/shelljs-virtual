@@ -103,7 +103,7 @@ sh.grep('-rn', 'TODO', '/project/src').to('/project/todos.txt');
 sh.find('/project/src').grep('hello').wc('-l');
 ```
 
-The pipe mechanism passes the previous command's `.stdout` as implicit stdin. Empty or failing pipeline inputs preserve the non-zero exit code so later commands do not quietly convert a failure into success.
+The pipe mechanism passes the previous command's `.stdout` as implicit stdin. Empty or failing pipeline inputs preserve the non-zero exit code so later commands do not quietly convert a failure into success. Commands that accept stdin-like input reject mixed stdin plus file-path usage instead of silently ignoring one side.
 
 ## Commands
 
@@ -168,7 +168,9 @@ The pipe mechanism passes the previous command's `.stdout` as implicit stdin. Em
 
 #### `find(path...)`
 
+- Long options: `--hidden`, `--exclude=GLOB`, `--max-results=N`
 - Recursively walks the virtual tree and returns absolute paths
+- Hidden files and directories are skipped by default unless `--hidden` is passed or a hidden target is addressed directly
 
 ### Text Processing
 
@@ -176,7 +178,7 @@ The pipe mechanism passes the previous command's `.stdout` as implicit stdin. Em
 
 - Flags: `-v`, `-l`, `-i`, `-n`, `-r`, `-R`, `-c`, `-w`, `-H`, `-h`, `-o`
 - Structured options: `-A`, `-B`, `-C`, `-m`
-- Long options: `--include=GLOB`, `--exclude=GLOB`, `--exclude-dir=GLOB`
+- Long options: `--hidden`, `--include=GLOB`, `--exclude=GLOB`, `--exclude-dir=GLOB`, `--max-count-total=N`
 - Accepts `string` or `RegExp` patterns
 - Skips binary-looking files when recursing
 - Uses 1-based line numbers
@@ -227,6 +229,13 @@ sh.grep('-w', 'add', '/project/src/math/add.ts');
 - Flags: `-l`, `-w`, `-c`, `-m`
 - Default output includes lines, words, and bytes
 - Multiple files include a totals row
+
+### Failure Semantics
+
+- Routine command failures return `.code` and `.stderr` instead of throwing.
+- Text-oriented file reads and mutations fail explicitly on binary-looking targets instead of silently decoding them.
+- `cp()`, `mv()`, and `rm()` validate all explicit inputs before mutating the virtual filesystem, so a later missing path does not leave a partial change behind.
+- `find()` and `ls()` surface missing explicit paths as non-zero results with empty output.
 
 ### Agent-Oriented Commands
 

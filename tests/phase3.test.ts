@@ -74,11 +74,11 @@ describe('phase 3 text processing', () => {
 
     const catResult = shell.cat('/project/missing.txt');
     expect(catResult.code).toBe(1);
-    expect(catResult.stderr).toContain('ENOENT');
+    expect(catResult.stderr).toBe('cat: no such file or directory: missing.txt');
 
     const grepResult = shell.grep('hello', '/project/missing.txt');
     expect(grepResult.code).toBe(1);
-    expect(grepResult.stderr).toContain('ENOENT');
+    expect(grepResult.stderr).toBe('grep: no such file or directory: missing.txt');
   });
 
   test('sed supports in-place updates, capture groups, function replacements, and piping', () => {
