@@ -4,3 +4,6 @@ node_modules
 dist
 coverage
 .tmp
+
+.cache/
+.bun-install-cache/
