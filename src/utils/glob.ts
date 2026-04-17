@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { isDirectory } from '../common.js';
+import { isDirectory, readdirEntryName } from '../common.js';
 import type { VirtualFS } from '../types.js';
 import { dirnameVirtualPath, normalizeVirtualPath, resolveVirtualPath } from './path.js';
 
@@ -14,6 +14,9 @@ function expandBraces(pattern: string): string[] {
   }
 
   const [token, rawOptions] = match;
+  if (!rawOptions) {
+    return [pattern];
+  }
   return rawOptions
     .split(',')
     .flatMap((option) => expandBraces(pattern.replace(token, option)));
@@ -44,7 +47,8 @@ function matchSegments(patternSegments: string[], candidateSegments: string[]): 
     return candidateSegments.length === 0;
   }
 
-  const [head, ...tail] = patternSegments;
+  const head = patternSegments[0]!;
+  const tail = patternSegments.slice(1);
   if (head === '**') {
     if (matchSegments(tail, candidateSegments)) {
       return true;
@@ -75,7 +79,7 @@ function walkTree(fs: VirtualFS, currentPath: string, acc: string[]): void {
 
   const entries = fs.readdirSync(currentPath);
   for (const entry of entries) {
-    const name = typeof entry === 'string' ? entry : entry.name;
+    const name = readdirEntryName(entry);
     walkTree(fs, normalizeVirtualPath(path.posix.join(currentPath, name)), acc);
   }
 }

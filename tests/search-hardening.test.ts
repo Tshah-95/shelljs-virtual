@@ -21,7 +21,7 @@ describe('search hardening', () => {
     expect(withHidden).toContain('/project/src/.cache/tmp.ts');
 
     const explicitHidden = shell.find('/project/.secret');
-    expect(explicitHidden).toEqual(['/project/.secret', '/project/.secret/config.ts']);
+    expect(Array.from(explicitHidden)).toEqual(['/project/.secret', '/project/.secret/config.ts']);
   });
 
   test('find supports exclude globs and deterministic max-results', () => {

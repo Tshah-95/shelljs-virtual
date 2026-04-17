@@ -148,7 +148,7 @@ export class Volume {
     return Buffer.from(value, 'utf8');
   }
 
-  writeFileSync(target: string, data: string | Uint8Array): void {
+  writeFileSync(target: string, data: string | Uint8Array, _options?: unknown): void {
     const normalized = normalizeVirtualPath(target);
     this.ensureDirectory(dirnameVirtualPath(normalized));
     const parent = this.requireDirectory(dirnameVirtualPath(normalized));
@@ -156,7 +156,7 @@ export class Volume {
     parent.children!.set(name, createFileNode(name, typeof data === 'string' ? data : Buffer.from(data).toString('utf8')));
   }
 
-  appendFileSync(target: string, data: string | Uint8Array): void {
+  appendFileSync(target: string, data: string | Uint8Array, _options?: unknown): void {
     const normalized = normalizeVirtualPath(target);
     const value = typeof data === 'string' ? data : Buffer.from(data).toString('utf8');
     const existing = this.existsSync(normalized) ? String(this.readFileSync(normalized, 'utf8')) : '';

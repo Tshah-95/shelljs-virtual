@@ -94,7 +94,7 @@ describe('phase 3 text processing', () => {
       '// greeting utility\nexport function greet(name: string): string {\n  return `Hello, ${name}!`;\n}\n',
     );
 
-    const functional = shell.sed(/add/g, (match) => match.toUpperCase(), '/project/src/math/add.ts');
+    const functional = shell.sed(/add/g, (match: string) => match.toUpperCase(), '/project/src/math/add.ts');
     expect(functional.stdout).toContain('ADD');
 
     const piped = shell.cat('/project/src/math/add.ts').sed(/add/g, 'sum');

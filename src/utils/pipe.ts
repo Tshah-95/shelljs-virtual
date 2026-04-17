@@ -199,6 +199,7 @@ export class ShellArrayResult<T = string> extends Array<T> {
     return this.requireShell().tail(...args, { stdin: this.stdout });
   }
 
+  // @ts-expect-error Intentional shell-style pipeline override; differs from Array.prototype.sort.
   sort(...args: unknown[]): ShellString {
     if (this.code !== 0 && this.stdout.length === 0) {
       return new ShellString('', { code: this.code, stderr: this.stderr, shell: this.shell });

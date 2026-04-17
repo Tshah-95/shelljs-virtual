@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { VirtualFS, VirtualStat } from './types.js';
+import type { VirtualDirent, VirtualFS, VirtualStat } from './types.js';
 import { basenameVirtualPath, dirnameVirtualPath, normalizeVirtualPath } from './utils/path.js';
 
 export function toArray<T>(value: T | T[] | undefined): T[] {
@@ -40,6 +40,16 @@ export function decodeText(value: string | Uint8Array): string {
     return value;
   }
   return Buffer.from(value).toString('utf8');
+}
+
+export function readdirEntryName(entry: string | Uint8Array | VirtualDirent): string {
+  if (typeof entry === 'string') {
+    return entry;
+  }
+  if (entry instanceof Uint8Array) {
+    return decodeText(entry);
+  }
+  return decodeText(entry.name);
 }
 
 export function readTextFile(fs: VirtualFS, target: string): string {

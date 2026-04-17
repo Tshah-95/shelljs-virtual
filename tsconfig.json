@@ -6,6 +6,7 @@
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
     "lib": ["ES2020"],
     "types": ["bun-types"]
   },

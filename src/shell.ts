@@ -13,6 +13,7 @@ import {
   joinLines,
   looksBinary,
   parseMode,
+  readdirEntryName,
   readTextFile,
   relativeDisplayPath,
   safeStat,
@@ -241,7 +242,7 @@ export class Shell {
       const enqueueChildren = (queue: Array<{ path: string; allowHidden: boolean }>, current: string, allowHidden: boolean): void => {
         const entries = this.fs.readdirSync(current);
         const names = entries
-          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .map((entry) => readdirEntryName(entry))
           .sort((left, right) => left.localeCompare(right));
 
         for (const name of names) {
@@ -865,7 +866,7 @@ export class Shell {
 
         const entries = this.fs.readdirSync(target);
         for (const entry of entries) {
-          const name = typeof entry === 'string' ? entry : entry.name;
+          const name = readdirEntryName(entry);
           if (!all && name.startsWith('.')) {
             continue;
           }
@@ -1061,7 +1062,7 @@ export class Shell {
     const positional: unknown[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (arg === '--numbers') {
         options.numbers = true;
         continue;
@@ -1168,7 +1169,7 @@ export class Shell {
     const positional: string[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (arg === '--name-only') {
         options.nameOnly = true;
         continue;
@@ -1241,7 +1242,7 @@ export class Shell {
       if (stat.isDirectory()) {
         const entries = this.fs.readdirSync(absolutePath);
         const names = entries
-          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .map((entry) => readdirEntryName(entry))
           .sort((left, right) => left.localeCompare(right));
 
         for (const name of names) {
@@ -1490,7 +1491,7 @@ export class Shell {
     const positional: unknown[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (arg === '--dry-run') {
         options.dryRun = true;
         continue;
@@ -1517,7 +1518,7 @@ export class Shell {
 
     const requiredArgs = pipe?.stdin !== undefined ? 2 : 3;
     if (positional.length !== requiredArgs) {
-      throw new Error(`replace: expected ${requiredArgs} argument${requiredArgs === 1 ? '' : 's'}`);
+      throw new Error(`replace: expected ${requiredArgs} arguments`);
     }
 
     const pathValue = pipe?.stdin !== undefined ? null : positional[0];
@@ -1812,7 +1813,7 @@ export class Shell {
     let fromStart = false;
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (typeof arg === 'number') {
         count = arg;
         continue;
@@ -1856,7 +1857,7 @@ export class Shell {
     const paths: string[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (typeof arg === 'object' && arg !== null) {
         const record = arg as Record<string, unknown>;
         if (record['-r']) options.reverse = true;
@@ -1926,7 +1927,7 @@ export class Shell {
     const paths: string[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (arg === '--hidden') {
         options.hidden = true;
         continue;
@@ -2001,7 +2002,7 @@ export class Shell {
     const paths: string[] = [];
 
     for (let index = 0; index < args.length; index += 1) {
-      const arg = args[index];
+      const arg = args[index]!;
       if (pattern === undefined && typeof arg === 'object' && arg !== null && !(arg instanceof RegExp)) {
         const record = arg as Record<string, unknown>;
         if (record['-A'] !== undefined) options.after = Number(record['-A']);
@@ -2049,7 +2050,7 @@ export class Shell {
         options.maxCountTotal = Number(arg.slice('--max-count-total='.length));
         continue;
       }
-      if (pattern === undefined && typeof arg === 'string' && arg.startsWith('-') && !(arg instanceof RegExp)) {
+      if (pattern === undefined && typeof arg === 'string' && arg.startsWith('-')) {
         if (arg === '-A' || arg === '-B' || arg === '-C' || arg === '-m') {
           const value = Number(args[index + 1]);
           if (arg === '-A') options.after = value;
@@ -2126,7 +2127,7 @@ export class Shell {
 
         const entries = this.fs.readdirSync(absolutePath);
         const names = entries
-          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .map((entry) => readdirEntryName(entry))
           .sort((left, right) => left.localeCompare(right));
 
         for (const name of names) {
@@ -2297,7 +2298,7 @@ export class Shell {
       this.fs.mkdirSync(destination, { recursive: true });
       const entries = this.fs.readdirSync(source);
       for (const entry of entries) {
-        const name = typeof entry === 'string' ? entry : entry.name;
+        const name = readdirEntryName(entry);
         this.copyNode(
           normalizeVirtualPath(path.posix.join(source, name)),
           normalizeVirtualPath(path.posix.join(destination, name)),
@@ -2330,7 +2331,7 @@ export class Shell {
       }
       const entries = this.fs.readdirSync(target);
       for (const entry of entries) {
-        const name = typeof entry === 'string' ? entry : entry.name;
+        const name = readdirEntryName(entry);
         this.removeNode(normalizeVirtualPath(path.posix.join(target, name)), true, force);
       }
       if (this.fs.rmSync) {

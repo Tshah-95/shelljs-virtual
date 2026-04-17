@@ -332,9 +332,11 @@ const restoredShell = new Shell({ fs: createFsFromVolume(restoredVol), cwd: '/pr
 
 This repository uses bun-native scripts:
 
-- `bun run build`
 - `bun run lint`
+- `bun run check`
 - `bun test`
+- `bun run build`
+- `bun run verify`
 - `bun run test:phase1`
 - `bun run test:phase2`
 - `bun run test:phase3`

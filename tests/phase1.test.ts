@@ -31,7 +31,7 @@ describe('phase 1 infrastructure', () => {
   test('expands glob patterns using the injected filesystem', () => {
     const { shell } = createTestShell();
 
-    expect(shell.glob('/project/src/**/*.ts')).toEqual([
+    expect(Array.from(shell.glob('/project/src/**/*.ts'))).toEqual([
       '/project/src/index.ts',
       '/project/src/math/add.ts',
       '/project/src/math/multiply.ts',
