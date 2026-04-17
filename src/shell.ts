@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { applyPatch as applyUnifiedPatch, parsePatch, reversePatch, type ParsedDiff } from 'diff';
+import { applyPatch as applyUnifiedPatch, parsePatch, reversePatch, structuredPatch, type ParsedDiff } from 'diff';
 import {
   appendTextFile,
   basename,
@@ -91,6 +91,22 @@ interface TextMatch {
   start: number;
   end: number;
   text: string;
+}
+
+interface DiffCommandOptions {
+  nameOnly: boolean;
+  stat: boolean;
+  context: number;
+}
+
+interface DiffEntry {
+  label: string;
+  oldLabel: string;
+  newLabel: string;
+  patch: ParsedDiff | null;
+  added: number;
+  removed: number;
+  binary: boolean;
 }
 
 function buildLineDiff(leftLines: string[], rightLines: string[]): DiffOp[] {
@@ -780,34 +796,30 @@ export class Shell {
   }
 
   diff(...args: unknown[]): ShellString {
-    const inputs = args.filter((value) => typeof value === 'string') as string[];
-    if (inputs.length !== 2) {
-      return this.fail('diff: expected two file paths');
+    try {
+      const { options, leftPath, rightPath } = this.parseDiffArgs(args);
+      if (!this.fs.existsSync(leftPath) || !this.fs.existsSync(rightPath)) {
+        throw new Error('diff: both paths must exist');
+      }
+
+      const leftStat = this.fs.statSync(leftPath);
+      const rightStat = this.fs.statSync(rightPath);
+      if (leftStat.isDirectory() !== rightStat.isDirectory()) {
+        throw new Error('diff: cannot compare file to directory');
+      }
+
+      const entries = leftStat.isDirectory()
+        ? this.buildDirectoryDiffEntries(leftPath, rightPath, options.context)
+        : this.buildSingleFileDiffEntries(leftPath, rightPath, options.context);
+
+      if (entries.length === 0) {
+        return this.success('', 0);
+      }
+
+      return this.success(this.renderDiffEntries(entries, options), 1);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
     }
-
-    const leftPath = this.resolvePath(inputs[0]!);
-    const rightPath = this.resolvePath(inputs[1]!);
-    const left = this.fs.existsSync(leftPath) ? readTextFile(this.fs, leftPath) : '';
-    const right = this.fs.existsSync(rightPath) ? readTextFile(this.fs, rightPath) : '';
-
-    if (left === right) {
-      return this.success('', 0);
-    }
-
-    const leftLines = splitLines(left);
-    const rightLines = splitLines(right);
-    const ops = buildLineDiff(leftLines, rightLines);
-    const body = ops.map((op) => `${op.type}${op.value}`).join('\n');
-    const stdout = [
-      `--- ${relativeDisplayPath(this.cwd, leftPath)}`,
-      `+++ ${relativeDisplayPath(this.cwd, rightPath)}`,
-      `@@ -1,${leftLines.length} +1,${rightLines.length} @@`,
-      body,
-    ]
-      .filter(Boolean)
-      .join('\n');
-
-    return this.success(stdout, 1);
   }
 
   splice(...args: unknown[]): ShellString {
@@ -887,6 +899,207 @@ export class Shell {
 
   glob(pattern: string): ShellArrayResult<string> {
     return ShellArrayResult.from(expandGlob(this.fs, this.cwd, pattern), this);
+  }
+
+  private parseDiffArgs(args: unknown[]): { options: DiffCommandOptions; leftPath: string; rightPath: string } {
+    const options: DiffCommandOptions = { nameOnly: false, stat: false, context: 3 };
+    const positional: string[] = [];
+
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === '--name-only') {
+        options.nameOnly = true;
+        continue;
+      }
+      if (arg === '--stat') {
+        options.stat = true;
+        continue;
+      }
+      if (arg === '-U') {
+        options.context = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (typeof arg === 'string' && /^-U\d+$/.test(arg)) {
+        options.context = Number(arg.slice(2));
+        continue;
+      }
+      if (typeof arg === 'string') {
+        positional.push(arg);
+        continue;
+      }
+      throw new Error(`diff: unsupported argument: ${String(arg)}`);
+    }
+
+    if (options.nameOnly && options.stat) {
+      throw new Error('diff: choose either --name-only or --stat');
+    }
+    if (!Number.isInteger(options.context) || options.context < 0) {
+      throw new Error('diff: context must be a non-negative integer');
+    }
+    if (positional.length !== 2) {
+      throw new Error('diff: expected two paths');
+    }
+
+    return {
+      options,
+      leftPath: this.resolvePath(positional[0]!),
+      rightPath: this.resolvePath(positional[1]!),
+    };
+  }
+
+  private buildSingleFileDiffEntries(leftPath: string, rightPath: string, context: number): DiffEntry[] {
+    const leftLabel = relativeDisplayPath(this.cwd, leftPath);
+    const rightLabel = relativeDisplayPath(this.cwd, rightPath);
+    const entry = this.buildDiffEntry(leftPath, rightPath, leftLabel === rightLabel ? rightLabel : `${leftLabel} -> ${rightLabel}`, leftLabel, rightLabel, context);
+    return entry ? [entry] : [];
+  }
+
+  private buildDirectoryDiffEntries(leftRoot: string, rightRoot: string, context: number): DiffEntry[] {
+    const leftFiles = this.collectDiffFiles(leftRoot);
+    const rightFiles = this.collectDiffFiles(rightRoot);
+    const labels = Array.from(new Set([...leftFiles.keys(), ...rightFiles.keys()])).sort((left, right) => left.localeCompare(right));
+
+    const entries: DiffEntry[] = [];
+    for (const label of labels) {
+      const entry = this.buildDiffEntry(leftFiles.get(label) ?? null, rightFiles.get(label) ?? null, label, label, label, context);
+      if (entry) {
+        entries.push(entry);
+      }
+    }
+
+    return entries;
+  }
+
+  private collectDiffFiles(rootPath: string): Map<string, string> {
+    const files = new Map<string, string>();
+
+    const visit = (absolutePath: string, relativePath: string): void => {
+      const stat = this.fs.statSync(absolutePath);
+      if (stat.isDirectory()) {
+        const entries = this.fs.readdirSync(absolutePath);
+        const names = entries
+          .map((entry) => (typeof entry === 'string' ? entry : String(entry.name)))
+          .sort((left, right) => left.localeCompare(right));
+
+        for (const name of names) {
+          const childPath = normalizeVirtualPath(path.posix.join(absolutePath, name));
+          const childRelativePath = relativePath.length === 0 ? name : `${relativePath}/${name}`;
+          visit(childPath, childRelativePath);
+        }
+        return;
+      }
+
+      files.set(relativePath, absolutePath);
+    };
+
+    visit(rootPath, '');
+    files.delete('');
+    return files;
+  }
+
+  private buildDiffEntry(
+    leftPath: string | null,
+    rightPath: string | null,
+    label: string,
+    oldLabel: string,
+    newLabel: string,
+    context: number,
+  ): DiffEntry | null {
+    const leftRaw = leftPath ? this.fs.readFileSync(leftPath) : null;
+    const rightRaw = rightPath ? this.fs.readFileSync(rightPath) : null;
+    const binary = (leftRaw !== null && looksBinary(leftRaw)) || (rightRaw !== null && looksBinary(rightRaw));
+
+    if (binary) {
+      const sameBinary = leftRaw !== null && rightRaw !== null && Buffer.from(leftRaw).equals(Buffer.from(rightRaw));
+      if (sameBinary) {
+        return null;
+      }
+      return {
+        label,
+        oldLabel: leftPath ? oldLabel : '/dev/null',
+        newLabel: rightPath ? newLabel : '/dev/null',
+        patch: null,
+        added: 0,
+        removed: 0,
+        binary: true,
+      };
+    }
+
+    const left = leftRaw === null ? '' : decodeText(leftRaw);
+    const right = rightRaw === null ? '' : decodeText(rightRaw);
+    if (left === right) {
+      return null;
+    }
+
+    const patch = structuredPatch(
+      leftPath ? oldLabel : '/dev/null',
+      rightPath ? newLabel : '/dev/null',
+      left,
+      right,
+      '',
+      '',
+      { context },
+    );
+    const { added, removed } = this.countPatchStats(patch);
+
+    return {
+      label,
+      oldLabel: patch.oldFileName ?? oldLabel,
+      newLabel: patch.newFileName ?? newLabel,
+      patch,
+      added,
+      removed,
+      binary: false,
+    };
+  }
+
+  private countPatchStats(patch: ParsedDiff): { added: number; removed: number } {
+    let added = 0;
+    let removed = 0;
+
+    for (const hunk of patch.hunks) {
+      for (const line of hunk.lines) {
+        if (line.startsWith('+') && !line.startsWith('+++')) {
+          added += 1;
+        }
+        if (line.startsWith('-') && !line.startsWith('---')) {
+          removed += 1;
+        }
+      }
+    }
+
+    return { added, removed };
+  }
+
+  private renderDiffEntries(entries: DiffEntry[], options: DiffCommandOptions): string {
+    if (options.nameOnly) {
+      return entries.map((entry) => entry.label).join('\n');
+    }
+
+    if (options.stat) {
+      return entries
+        .map((entry) => (entry.binary ? `binary ${entry.label}` : `${String(entry.added).padStart(4)}+ ${String(entry.removed).padStart(4)}- ${entry.label}`))
+        .join('\n');
+    }
+
+    return entries
+      .map((entry) => (entry.binary ? `Binary files ${entry.oldLabel} and ${entry.newLabel} differ` : this.renderStructuredPatch(entry.patch!)))
+      .join('\n');
+  }
+
+  private renderStructuredPatch(patch: ParsedDiff): string {
+    const lines = [
+      `--- ${patch.oldFileName ?? '/dev/null'}`,
+      `+++ ${patch.newFileName ?? '/dev/null'}`,
+    ];
+
+    for (const hunk of patch.hunks) {
+      lines.push(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+      lines.push(...hunk.lines);
+    }
+
+    return lines.join('\n');
   }
 
   private parsePatchArgs(args: unknown[], pipe?: PipeInput): { options: PatchCommandOptions; patchText: string } {
