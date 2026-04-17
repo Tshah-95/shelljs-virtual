@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { applyPatch as applyUnifiedPatch, parsePatch, reversePatch, type ParsedDiff } from 'diff';
 import {
   appendTextFile,
   basename,
@@ -57,6 +58,21 @@ function formatCount(value: number, label: string): string {
 interface DiffOp {
   type: ' ' | '+' | '-';
   value: string;
+}
+
+interface PatchCommandOptions {
+  dryRun: boolean;
+  check: boolean;
+  reverse: boolean;
+}
+
+interface PatchMutation {
+  sourcePath: string | null;
+  targetPath: string | null;
+  output: string;
+  hunks: number;
+  created: boolean;
+  deleted: boolean;
 }
 
 function buildLineDiff(leftLines: string[], rightLines: string[]): DiffOp[] {
@@ -657,6 +673,61 @@ export class Shell {
     return ShellArrayResult.from(results, this);
   }
 
+  patch(...args: unknown[]): ShellString {
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, patchText } = this.parsePatchArgs(args.filter((value) => !isPipeInput(value)), pipe);
+      if (patchText.trim().length === 0) {
+        return this.fail('patch: missing patch text');
+      }
+
+      const parsedPatches = parsePatch(patchText, { strict: true });
+      if (
+        parsedPatches.length === 0
+        || parsedPatches.every((patch) => patch.hunks.length === 0 && !patch.oldFileName && !patch.newFileName)
+      ) {
+        return this.fail('patch: no patch data');
+      }
+
+      const patches = options.reverse ? (reversePatch(parsedPatches) as unknown as ParsedDiff[]) : parsedPatches;
+      const mutations = this.buildPatchMutations(patches);
+      const action = options.dryRun || options.check ? 'checked' : 'patched';
+
+      if (!options.dryRun && !options.check) {
+        for (const mutation of mutations) {
+          if (mutation.deleted) {
+            this.removeNode(mutation.sourcePath!, false, false);
+            continue;
+          }
+
+          if (!mutation.targetPath) {
+            continue;
+          }
+
+          writeTextFile(this.fs, mutation.targetPath, mutation.output);
+          if (mutation.sourcePath && mutation.sourcePath !== mutation.targetPath && this.fs.existsSync(mutation.sourcePath)) {
+            this.removeNode(mutation.sourcePath, false, false);
+          }
+        }
+      }
+
+      const stdout = mutations
+        .map((mutation) => {
+          const labelPath = mutation.targetPath ?? mutation.sourcePath ?? '.';
+          const details: string[] = [];
+          if (mutation.created) details.push('created');
+          if (mutation.deleted) details.push('deleted');
+          const suffix = details.length > 0 ? `, ${details.join(', ')}` : '';
+          return `${action} ${relativeDisplayPath(this.cwd, labelPath)} (${mutation.hunks} hunk${mutation.hunks === 1 ? '' : 's'}${suffix})`;
+        })
+        .join('\n');
+
+      return this.success(stdout);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
+  }
+
   diff(...args: unknown[]): ShellString {
     const inputs = args.filter((value) => typeof value === 'string') as string[];
     if (inputs.length !== 2) {
@@ -765,6 +836,124 @@ export class Shell {
 
   glob(pattern: string): ShellArrayResult<string> {
     return ShellArrayResult.from(expandGlob(this.fs, this.cwd, pattern), this);
+  }
+
+  private parsePatchArgs(args: unknown[], pipe?: PipeInput): { options: PatchCommandOptions; patchText: string } {
+    const options: PatchCommandOptions = { dryRun: false, check: false, reverse: false };
+    const patchArgs: string[] = [];
+
+    for (const arg of args) {
+      if (arg === '--dry-run') {
+        options.dryRun = true;
+        continue;
+      }
+      if (arg === '--check') {
+        options.check = true;
+        continue;
+      }
+      if (arg === '--reverse') {
+        options.reverse = true;
+        continue;
+      }
+      if (typeof arg === 'string') {
+        patchArgs.push(arg);
+        continue;
+      }
+      throw new Error(`patch: unsupported argument: ${String(arg)}`);
+    }
+
+    if (pipe?.stdin !== undefined && patchArgs.length > 0) {
+      throw new Error('patch: provide patch text either via stdin or a single argument');
+    }
+    if (patchArgs.length > 1) {
+      throw new Error('patch: expected a single patch text argument');
+    }
+
+    return { options, patchText: pipe?.stdin ?? patchArgs[0] ?? '' };
+  }
+
+  private buildPatchMutations(patches: ParsedDiff[]): PatchMutation[] {
+    return patches.map((patch, index) => {
+      const sourceName = this.resolvePatchPath(patch.oldFileName, patch.newFileName, 'a/');
+      const targetName = this.resolvePatchPath(patch.newFileName, patch.oldFileName, 'b/');
+      const displayName = targetName ?? sourceName ?? `patch ${index + 1}`;
+      if (!sourceName && !targetName) {
+        throw new Error(`patch: missing file path for ${displayName}`);
+      }
+      if (patch.hunks.length === 0) {
+        throw new Error(`patch: no hunks for ${displayName}`);
+      }
+
+      const sourcePath = sourceName ? this.resolvePath(sourceName) : null;
+      const targetPath = targetName ? this.resolvePath(targetName) : null;
+
+      let source = '';
+      if (sourcePath) {
+        if (!this.fs.existsSync(sourcePath)) {
+          throw new Error(`patch: target file missing: ${sourceName}`);
+        }
+
+        const raw = this.fs.readFileSync(sourcePath);
+        if (looksBinary(raw)) {
+          throw new Error(`patch: binary file not supported: ${sourceName}`);
+        }
+        source = decodeText(raw);
+      }
+
+      const output = applyUnifiedPatch(source, patch, { fuzzFactor: 0 });
+      if (output === false) {
+        const failedHunk = this.findFailingPatchHunk(source, patch);
+        throw new Error(`patch: hunk ${failedHunk ?? '?'} failed for ${displayName}`);
+      }
+
+      return {
+        sourcePath,
+        targetPath,
+        output,
+        hunks: patch.hunks.length,
+        created: sourcePath === null && targetPath !== null,
+        deleted: sourcePath !== null && targetPath === null,
+      };
+    });
+  }
+
+  private findFailingPatchHunk(source: string, patch: ParsedDiff): number | null {
+    for (let index = 0; index < patch.hunks.length; index += 1) {
+      const attempt = applyUnifiedPatch(
+        source,
+        {
+          ...patch,
+          hunks: patch.hunks.slice(0, index + 1),
+        },
+        { fuzzFactor: 0 },
+      );
+
+      if (attempt === false) {
+        return index + 1;
+      }
+    }
+
+    return null;
+  }
+
+  private resolvePatchPath(
+    fileName: string | undefined,
+    counterpartFileName: string | undefined,
+    expectedPrefix: 'a/' | 'b/',
+  ): string | null {
+    if (!fileName || fileName === '/dev/null') {
+      return null;
+    }
+
+    const oppositePrefix = expectedPrefix === 'a/' ? 'b/' : 'a/';
+    if (
+      fileName.startsWith(expectedPrefix)
+      && (counterpartFileName === '/dev/null' || counterpartFileName?.startsWith(oppositePrefix))
+    ) {
+      return fileName.slice(expectedPrefix.length);
+    }
+
+    return fileName;
   }
 
   private extractPipeInput(args: unknown[]): PipeInput | undefined {
