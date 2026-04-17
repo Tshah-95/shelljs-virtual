@@ -109,6 +109,15 @@ interface DiffEntry {
   binary: boolean;
 }
 
+interface ShowCommandOptions {
+  numbers: boolean;
+  context: number;
+  startLine?: number;
+  endLine?: number;
+  aroundLine?: number;
+  aroundMatch?: string | RegExp;
+}
+
 function buildLineDiff(leftLines: string[], rightLines: string[]): DiffOp[] {
   const rows = leftLines.length + 1;
   const cols = rightLines.length + 1;
@@ -359,6 +368,35 @@ export class Shell {
       if (!options.dryRun) {
         writeTextFile(this.fs, targetPath, output);
       }
+
+      return this.success(output);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
+  }
+
+  show(...args: unknown[]): ShellString {
+    try {
+      const { options, targetPath } = this.parseShowArgs(args);
+      const raw = this.fs.readFileSync(targetPath);
+      if (looksBinary(raw)) {
+        throw new Error(`show: binary file not supported: ${relativeDisplayPath(this.cwd, targetPath)}`);
+      }
+
+      const source = decodeText(raw).replace(/\r\n/g, '\n');
+      const lines = splitLines(source);
+      if (lines.length === 0) {
+        throw new Error(`show: file is empty: ${relativeDisplayPath(this.cwd, targetPath)}`);
+      }
+
+      const range = this.resolveShowRange(source, lines, options, relativeDisplayPath(this.cwd, targetPath));
+      const selected = lines.slice(range.startLine - 1, range.endLine);
+      const output = selected
+        .map((line, index) => {
+          const lineNumber = range.startLine + index;
+          return options.numbers ? `${String(lineNumber).padStart(6, ' ')}  ${line}` : line;
+        })
+        .join('\n');
 
       return this.success(output);
     } catch (error) {
@@ -899,6 +937,113 @@ export class Shell {
 
   glob(pattern: string): ShellArrayResult<string> {
     return ShellArrayResult.from(expandGlob(this.fs, this.cwd, pattern), this);
+  }
+
+  private parseShowArgs(args: unknown[]): { options: ShowCommandOptions; targetPath: string } {
+    const options: ShowCommandOptions = { numbers: false, context: 0 };
+    const positional: unknown[] = [];
+
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === '--numbers') {
+        options.numbers = true;
+        continue;
+      }
+      if (arg === '--context') {
+        options.context = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (typeof arg === 'string' && arg.startsWith('--context=')) {
+        options.context = Number(arg.slice('--context='.length));
+        continue;
+      }
+      if (arg === '--around-line') {
+        options.aroundLine = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (arg === '--around-match') {
+        options.aroundMatch = args[index + 1] as string | RegExp;
+        index += 1;
+        continue;
+      }
+      positional.push(arg);
+    }
+
+    if (!Number.isInteger(options.context) || options.context < 0) {
+      throw new Error('show: context must be a non-negative integer');
+    }
+
+    const contextualModes = Number(options.aroundLine !== undefined) + Number(options.aroundMatch !== undefined);
+    if (contextualModes > 1) {
+      throw new Error('show: choose either --around-line or --around-match');
+    }
+
+    if (options.aroundLine !== undefined || options.aroundMatch !== undefined) {
+      if (positional.length !== 1) {
+        throw new Error('show: expected exactly one file path for contextual mode');
+      }
+      return {
+        options,
+        targetPath: this.resolvePath(String(positional[0])),
+      };
+    }
+
+    if (positional.length !== 3) {
+      throw new Error('show: expected file path, start line, and end line');
+    }
+
+    options.startLine = Number(positional[1]);
+    options.endLine = Number(positional[2]);
+    return {
+      options,
+      targetPath: this.resolvePath(String(positional[0])),
+    };
+  }
+
+  private resolveShowRange(
+    source: string,
+    lines: string[],
+    options: ShowCommandOptions,
+    label: string,
+  ): { startLine: number; endLine: number } {
+    if (options.aroundLine !== undefined) {
+      if (!Number.isInteger(options.aroundLine) || options.aroundLine < 1 || options.aroundLine > lines.length) {
+        throw new Error(`show: line out of bounds for ${label}: ${options.aroundLine}`);
+      }
+      return {
+        startLine: Math.max(1, options.aroundLine - options.context),
+        endLine: Math.min(lines.length, options.aroundLine + options.context),
+      };
+    }
+
+    if (options.aroundMatch !== undefined) {
+      const matches = this.collectTextMatches(source, options.aroundMatch, 'insert');
+      if (matches.length !== 1) {
+        throw new Error(`show: expected exactly 1 match in ${label}, found ${matches.length}`);
+      }
+
+      const lineNumber = source.slice(0, matches[0]!.start).split('\n').length;
+      return {
+        startLine: Math.max(1, lineNumber - options.context),
+        endLine: Math.min(lines.length, lineNumber + options.context),
+      };
+    }
+
+    if (
+      !Number.isInteger(options.startLine)
+      || !Number.isInteger(options.endLine)
+      || options.startLine === undefined
+      || options.endLine === undefined
+      || options.startLine < 1
+      || options.endLine < options.startLine
+      || options.endLine > lines.length
+    ) {
+      throw new Error(`show: invalid line range for ${label}: ${String(options.startLine)}-${String(options.endLine)}`);
+    }
+
+    return { startLine: options.startLine, endLine: options.endLine };
   }
 
   private parseDiffArgs(args: unknown[]): { options: DiffCommandOptions; leftPath: string; rightPath: string } {
