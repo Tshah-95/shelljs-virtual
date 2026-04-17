@@ -61,6 +61,13 @@ export class ShellString {
     return this.requireShell().patch(...args, { stdin: this.stdout });
   }
 
+  replace(...args: unknown[]): ShellString {
+    if (this.code !== 0 && this.stdout.length === 0) {
+      return new ShellString('', { code: this.code, stderr: this.stderr, shell: this.shell });
+    }
+    return this.requireShell().replace(...args, { stdin: this.stdout });
+  }
+
   head(...args: unknown[]): ShellString {
     if (this.code !== 0 && this.stdout.length === 0) {
       return new ShellString('', { code: this.code, stderr: this.stderr, shell: this.shell });
@@ -169,6 +176,13 @@ export class ShellArrayResult<T = string> extends Array<T> {
       return new ShellString('', { code: this.code, stderr: this.stderr, shell: this.shell });
     }
     return this.requireShell().patch(...args, { stdin: this.stdout });
+  }
+
+  replace(...args: unknown[]): ShellString {
+    if (this.code !== 0 && this.stdout.length === 0) {
+      return new ShellString('', { code: this.code, stderr: this.stderr, shell: this.shell });
+    }
+    return this.requireShell().replace(...args, { stdin: this.stdout });
   }
 
   head(...args: unknown[]): ShellString {

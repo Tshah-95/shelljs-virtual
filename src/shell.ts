@@ -75,6 +75,24 @@ interface PatchMutation {
   deleted: boolean;
 }
 
+interface ReplaceCommandOptions {
+  dryRun: boolean;
+  all: boolean;
+  regex: boolean;
+  expected?: number;
+}
+
+interface InsertCommandOptions {
+  dryRun: boolean;
+  mode: 'before' | 'after' | 'at-start' | 'at-end';
+}
+
+interface TextMatch {
+  start: number;
+  end: number;
+  text: string;
+}
+
 function buildLineDiff(leftLines: string[], rightLines: string[]): DiffOp[] {
   const rows = leftLines.length + 1;
   const cols = rightLines.length + 1;
@@ -297,6 +315,39 @@ export class Shell {
     }
 
     return this.success(outputs.join('\n'));
+  }
+
+  replace(...args: unknown[]): ShellString {
+    try {
+      const pipe = this.extractPipeInput(args);
+      const { options, targetPath, search, replacement } = this.parseReplaceArgs(args.filter((value) => !isPipeInput(value)), pipe);
+      const { source, label } = this.readReplaceableTarget(targetPath, 'replace', pipe);
+      const output = this.applyReplace(source, search, replacement, options, label);
+
+      if (!options.dryRun && targetPath) {
+        writeTextFile(this.fs, targetPath, output);
+      }
+
+      return this.success(output);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
+  }
+
+  insert(...args: unknown[]): ShellString {
+    try {
+      const { options, targetPath, anchor, content } = this.parseInsertArgs(args);
+      const { source, label } = this.readReplaceableTarget(targetPath, 'insert');
+      const output = this.applyInsert(source, anchor, content, options, label);
+
+      if (!options.dryRun) {
+        writeTextFile(this.fs, targetPath, output);
+      }
+
+      return this.success(output);
+    } catch (error) {
+      return this.fail(this.errorMessage(error));
+    }
   }
 
   head(...args: unknown[]): ShellString {
@@ -954,6 +1005,250 @@ export class Shell {
     }
 
     return fileName;
+  }
+
+  private parseReplaceArgs(
+    args: unknown[],
+    pipe?: PipeInput,
+  ): { options: ReplaceCommandOptions; targetPath: string | null; search: string | RegExp; replacement: string } {
+    const options: ReplaceCommandOptions = { dryRun: false, all: false, regex: false };
+    const positional: unknown[] = [];
+
+    for (let index = 0; index < args.length; index += 1) {
+      const arg = args[index];
+      if (arg === '--dry-run') {
+        options.dryRun = true;
+        continue;
+      }
+      if (arg === '--all') {
+        options.all = true;
+        continue;
+      }
+      if (arg === '--regex') {
+        options.regex = true;
+        continue;
+      }
+      if (arg === '--expected') {
+        options.expected = Number(args[index + 1]);
+        index += 1;
+        continue;
+      }
+      if (typeof arg === 'string' && arg.startsWith('--expected=')) {
+        options.expected = Number(arg.slice('--expected='.length));
+        continue;
+      }
+      positional.push(arg);
+    }
+
+    const requiredArgs = pipe?.stdin !== undefined ? 2 : 3;
+    if (positional.length !== requiredArgs) {
+      throw new Error(`replace: expected ${requiredArgs} argument${requiredArgs === 1 ? '' : 's'}`);
+    }
+
+    const pathValue = pipe?.stdin !== undefined ? null : positional[0];
+    const search = positional[pipe?.stdin !== undefined ? 0 : 1];
+    const replacement = positional[pipe?.stdin !== undefined ? 1 : 2];
+
+    if ((typeof search !== 'string' && !(search instanceof RegExp)) || search === '') {
+      throw new Error('replace: missing search pattern');
+    }
+
+    return {
+      options,
+      targetPath: pathValue === null ? null : this.resolvePath(String(pathValue)),
+      search,
+      replacement: String(replacement),
+    };
+  }
+
+  private parseInsertArgs(
+    args: unknown[],
+  ): { options: InsertCommandOptions; targetPath: string; anchor: string | RegExp | null; content: string } {
+    let mode: InsertCommandOptions['mode'] | null = null;
+    let dryRun = false;
+    const positional: unknown[] = [];
+
+    for (const arg of args) {
+      if (arg === '--dry-run') {
+        dryRun = true;
+        continue;
+      }
+      if (arg === '--before' || arg === '--after' || arg === '--at-start' || arg === '--at-end') {
+        if (mode) {
+          throw new Error('insert: choose exactly one insertion mode');
+        }
+        mode = arg.slice(2) as InsertCommandOptions['mode'];
+        continue;
+      }
+      positional.push(arg);
+    }
+
+    if (!mode) {
+      throw new Error('insert: missing insertion mode');
+    }
+
+    if (mode === 'at-start' || mode === 'at-end') {
+      if (positional.length !== 2) {
+        throw new Error('insert: expected file path and content');
+      }
+      return {
+        options: { dryRun, mode },
+        targetPath: this.resolvePath(String(positional[0])),
+        anchor: null,
+        content: String(positional[1]),
+      };
+    }
+
+    if (positional.length !== 3) {
+      throw new Error('insert: expected file path, anchor, and content');
+    }
+
+    const anchor = positional[1];
+    if ((typeof anchor !== 'string' && !(anchor instanceof RegExp)) || anchor === '') {
+      throw new Error('insert: missing anchor');
+    }
+
+    return {
+      options: { dryRun, mode },
+      targetPath: this.resolvePath(String(positional[0])),
+      anchor,
+      content: String(positional[2]),
+    };
+  }
+
+  private readReplaceableTarget(
+    targetPath: string | null,
+    command: 'replace' | 'insert',
+    pipe?: PipeInput,
+  ): { source: string; label: string } {
+    if (targetPath === null) {
+      return { source: pipe?.stdin ?? '', label: '(stdin)' };
+    }
+
+    const raw = this.fs.readFileSync(targetPath);
+    if (looksBinary(raw)) {
+      throw new Error(`${command}: binary file not supported: ${relativeDisplayPath(this.cwd, targetPath)}`);
+    }
+
+    return {
+      source: decodeText(raw),
+      label: relativeDisplayPath(this.cwd, targetPath),
+    };
+  }
+
+  private applyReplace(
+    source: string,
+    search: string | RegExp,
+    replacement: string,
+    options: ReplaceCommandOptions,
+    label: string,
+  ): string {
+    const matcher = this.normalizeMatcher(search, options.regex);
+    const matches = this.collectTextMatches(source, matcher, 'replace');
+    const replaceAll = options.expected !== undefined || options.all;
+
+    if (options.expected !== undefined && matches.length !== options.expected) {
+      throw new Error(`replace: expected ${options.expected} matches in ${label}, found ${matches.length}`);
+    }
+    if (options.expected === undefined && options.all && matches.length === 0) {
+      throw new Error(`replace: expected at least 1 match in ${label}, found 0`);
+    }
+    if (options.expected === undefined && !options.all && matches.length !== 1) {
+      throw new Error(`replace: expected exactly 1 match in ${label}, found ${matches.length}`);
+    }
+
+    if (typeof matcher === 'string') {
+      if (replaceAll) {
+        return source.split(matcher).join(replacement);
+      }
+
+      const match = matches[0]!;
+      return `${source.slice(0, match.start)}${replacement}${source.slice(match.end)}`;
+    }
+
+    const regex = replaceAll ? this.withGlobalFlag(matcher) : matcher;
+    return source.replace(regex, replacement);
+  }
+
+  private applyInsert(
+    source: string,
+    anchor: string | RegExp | null,
+    content: string,
+    options: InsertCommandOptions,
+    label: string,
+  ): string {
+    if (options.mode === 'at-start') {
+      return `${content}${source}`;
+    }
+    if (options.mode === 'at-end') {
+      return `${source}${content}`;
+    }
+    if (!anchor) {
+      throw new Error('insert: missing anchor');
+    }
+
+    const matches = this.collectTextMatches(source, anchor, 'insert');
+    if (matches.length !== 1) {
+      throw new Error(`insert: expected exactly 1 anchor match in ${label}, found ${matches.length}`);
+    }
+
+    const match = matches[0]!;
+    const index = options.mode === 'before' ? match.start : match.end;
+    return `${source.slice(0, index)}${content}${source.slice(index)}`;
+  }
+
+  private normalizeMatcher(search: string | RegExp, regexMode: boolean): string | RegExp {
+    if (search instanceof RegExp) {
+      return search;
+    }
+
+    if (regexMode) {
+      return new RegExp(search);
+    }
+
+    if (search.length === 0) {
+      throw new Error('replace: empty search is not allowed');
+    }
+
+    return search;
+  }
+
+  private collectTextMatches(source: string, search: string | RegExp, command: 'replace' | 'insert'): TextMatch[] {
+    if (typeof search === 'string') {
+      if (search.length === 0) {
+        throw new Error(`${command}: empty search is not allowed`);
+      }
+
+      const matches: TextMatch[] = [];
+      let start = 0;
+      while (start <= source.length) {
+        const index = source.indexOf(search, start);
+        if (index === -1) {
+          break;
+        }
+        matches.push({ start: index, end: index + search.length, text: search });
+        start = index + search.length;
+      }
+      return matches;
+    }
+
+    const regex = this.withGlobalFlag(search);
+    const matches: TextMatch[] = [];
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(source)) !== null) {
+      const value = match[0] ?? '';
+      if (value.length === 0) {
+        throw new Error(`${command}: zero-length regex matches are not supported`);
+      }
+      matches.push({ start: match.index, end: match.index + value.length, text: value });
+    }
+
+    return matches;
+  }
+
+  private withGlobalFlag(pattern: RegExp): RegExp {
+    const flags = pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`;
+    return new RegExp(pattern.source, flags);
   }
 
   private extractPipeInput(args: unknown[]): PipeInput | undefined {
