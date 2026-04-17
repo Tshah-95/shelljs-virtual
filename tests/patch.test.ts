@@ -44,6 +44,52 @@ describe('patch command', () => {
     assertFileNotExists(vol, '/project/src/generated.ts');
   });
 
+  test('preserves no-trailing-newline files when applying and reversing patches', () => {
+    const { shell, vol } = createTestShell({
+      '/project/no-newline.txt': 'one\ntwo',
+    });
+    const patchText = createTwoFilesPatch('no-newline.txt', 'no-newline.txt', 'one\ntwo', 'one\nTWO');
+
+    const applied = shell.patch(patchText);
+    expect(applied.code).toBe(0);
+    assertFileContents(vol, '/project/no-newline.txt', 'one\nTWO');
+
+    const reversed = shell.patch('--reverse', patchText);
+    expect(reversed.code).toBe(0);
+    assertFileContents(vol, '/project/no-newline.txt', 'one\ntwo');
+  });
+
+  test('supports successful multi-file patches with labels resolved from the current cwd', () => {
+    const { shell, vol } = createTestShell({
+      '/project/src/demo.ts': 'one\ntwo\n',
+      '/project/README.md': '# Title\n',
+    });
+    shell.cd('/project/src');
+
+    const demoPatch = createTwoFilesPatch('demo.ts', 'demo.ts', 'one\ntwo\n', 'one\nTWO\n');
+    const readmePatch = createTwoFilesPatch('../README.md', '../README.md', '# Title\n', '# Title\nUpdated\n');
+
+    const result = shell.patch(`${demoPatch.trimEnd()}\n${readmePatch}`);
+
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain('patched demo.ts (1 hunk)');
+    expect(result.stdout).toContain('patched ../README.md (1 hunk)');
+    assertFileContents(vol, '/project/src/demo.ts', 'one\nTWO\n');
+    assertFileContents(vol, '/project/README.md', '# Title\nUpdated\n');
+  });
+
+  test('applies patches against existing empty files', () => {
+    const { shell, vol } = createTestShell({
+      '/project/empty.txt': '',
+    });
+    const patchText = createTwoFilesPatch('empty.txt', 'empty.txt', '', 'hello\n');
+
+    const result = shell.patch(patchText);
+
+    expect(result.code).toBe(0);
+    assertFileContents(vol, '/project/empty.txt', 'hello\n');
+  });
+
   test('fails all-or-nothing when a later file hunk mismatches', () => {
     const { shell, vol } = createTestShell();
     const readmeOriginal = shell.cat('/project/README.md').stdout;

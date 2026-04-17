@@ -87,4 +87,29 @@ describe('phase 6 integration and edge cases', () => {
     expect(shell.cat('/project/deep/a/b/c/d/e/f/g/h/i/j/k.txt').stdout).toBe('deep value\n');
     expect(shell.find('/project/many').length).toBe(251);
   });
+
+  test('agent can edit a unicode no-newline file from a nested cwd and review it with relative diff paths', () => {
+    const vol = Volume.fromJSON({
+      '/project/baseline/naïve-🙂.ts': 'export const café = "🙂";',
+      '/project/src/naïve-🙂.ts': 'export const café = "🙂";',
+    });
+    const shell = new Shell({
+      fs: createFsFromVolume(vol),
+      cwd: '/project/src',
+    });
+
+    const preview = shell.replace('--dry-run', 'naïve-🙂.ts', '🙂', '🚀');
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toBe('export const café = "🚀";');
+
+    const applied = shell.replace('naïve-🙂.ts', '🙂', '🚀');
+    expect(applied.code).toBe(0);
+
+    const review = shell.diff('../baseline/naïve-🙂.ts', 'naïve-🙂.ts');
+    expect(review.code).toBe(1);
+    expect(review.stdout).toContain('../baseline/naïve-🙂.ts');
+    expect(review.stdout).toContain('naïve-🙂.ts');
+    expect(review.stdout).toContain('"🚀"');
+    expect(review.stdout).toContain('\\ No newline at end of file');
+  });
 });

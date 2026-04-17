@@ -4,8 +4,10 @@ import {
   appendTextFile,
   basename,
   decodeText,
+  detectNewlineStyle,
   ensureParentDir,
   hasTrailingNewline,
+  normalizeToNewlineStyle,
   isDirectory,
   isFile,
   joinLines,
@@ -1608,7 +1610,9 @@ export class Shell {
     options: ReplaceCommandOptions,
     label: string,
   ): string {
-    const matcher = this.normalizeMatcher(search, options.regex);
+    const normalizedSearch = typeof search === 'string' ? this.normalizeExactEditText(source, search) : search;
+    const normalizedReplacement = this.normalizeExactEditText(source, replacement);
+    const matcher = this.normalizeMatcher(normalizedSearch, options.regex);
     const matches = this.collectTextMatches(source, matcher, 'replace');
     const replaceAll = options.expected !== undefined || options.all;
 
@@ -1624,15 +1628,15 @@ export class Shell {
 
     if (typeof matcher === 'string') {
       if (replaceAll) {
-        return source.split(matcher).join(replacement);
+        return source.split(matcher).join(normalizedReplacement);
       }
 
       const match = matches[0]!;
-      return `${source.slice(0, match.start)}${replacement}${source.slice(match.end)}`;
+      return `${source.slice(0, match.start)}${normalizedReplacement}${source.slice(match.end)}`;
     }
 
     const regex = replaceAll ? this.withGlobalFlag(matcher) : matcher;
-    return source.replace(regex, replacement);
+    return source.replace(regex, normalizedReplacement);
   }
 
   private applyInsert(
@@ -1642,24 +1646,31 @@ export class Shell {
     options: InsertCommandOptions,
     label: string,
   ): string {
+    const normalizedContent = this.normalizeExactEditText(source, content);
+
     if (options.mode === 'at-start') {
-      return `${content}${source}`;
+      return `${normalizedContent}${source}`;
     }
     if (options.mode === 'at-end') {
-      return `${source}${content}`;
+      return `${source}${normalizedContent}`;
     }
     if (!anchor) {
       throw new Error('insert: missing anchor');
     }
 
-    const matches = this.collectTextMatches(source, anchor, 'insert');
+    const normalizedAnchor = typeof anchor === 'string' ? this.normalizeExactEditText(source, anchor) : anchor;
+    const matches = this.collectTextMatches(source, normalizedAnchor, 'insert');
     if (matches.length !== 1) {
       throw new Error(`insert: expected exactly 1 anchor match in ${label}, found ${matches.length}`);
     }
 
     const match = matches[0]!;
     const index = options.mode === 'before' ? match.start : match.end;
-    return `${source.slice(0, index)}${content}${source.slice(index)}`;
+    return `${source.slice(0, index)}${normalizedContent}${source.slice(index)}`;
+  }
+
+  private normalizeExactEditText(source: string, value: string): string {
+    return normalizeToNewlineStyle(value, detectNewlineStyle(source));
   }
 
   private normalizeMatcher(search: string | RegExp, regexMode: boolean): string | RegExp {

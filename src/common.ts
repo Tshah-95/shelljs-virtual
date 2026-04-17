@@ -83,6 +83,17 @@ export function hasTrailingNewline(value: string): boolean {
   return value.endsWith('\n');
 }
 
+export function detectNewlineStyle(value: string): '\n' | '\r\n' {
+  const crlfCount = value.match(/\r\n/g)?.length ?? 0;
+  const newlineCount = value.match(/\n/g)?.length ?? 0;
+  const lfCount = newlineCount - crlfCount;
+  return crlfCount > lfCount ? '\r\n' : '\n';
+}
+
+export function normalizeToNewlineStyle(value: string, newline: '\n' | '\r\n'): string {
+  return value.replace(/\r\n/g, '\n').replace(/\n/g, newline);
+}
+
 export function relativeDisplayPath(cwd: string, absolutePath: string): string {
   const relative = path.posix.relative(normalizeVirtualPath(cwd), normalizeVirtualPath(absolutePath));
   return relative.length === 0 ? '.' : relative;

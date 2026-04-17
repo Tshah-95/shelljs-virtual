@@ -37,6 +37,21 @@ describe('exact edit primitives', () => {
     expect(result.stdout).toBe('export x\nexport y\n');
   });
 
+  test('replace accepts LF-authored search text against CRLF files and preserves newline style', () => {
+    const { shell, vol } = createTestShell({
+      '/project/crlf.ts': 'first\r\nsecond\r\n',
+    });
+
+    const preview = shell.replace('--dry-run', '/project/crlf.ts', 'first\n', 'uno\n');
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toBe('uno\r\nsecond\r\n');
+    assertFileContents(vol, '/project/crlf.ts', 'first\r\nsecond\r\n');
+
+    const applied = shell.replace('/project/crlf.ts', 'first\n', 'uno\n');
+    expect(applied.code).toBe(0);
+    assertFileContents(vol, '/project/crlf.ts', 'uno\r\nsecond\r\n');
+  });
+
   test('replace can intentionally update all matches', () => {
     const { shell, vol } = createTestShell({
       '/project/demo.ts': 'foo\nfoo\n',
@@ -92,5 +107,31 @@ describe('exact edit primitives', () => {
     expect(ambiguous.code).toBe(1);
     expect(ambiguous.stderr).toBe('insert: expected exactly 1 anchor match in demo.ts, found 2');
     assertFileContents(vol, '/project/demo.ts', 'target\ntarget\n');
+  });
+
+  test('insert accepts LF-authored anchors against CRLF files and preserves newline style', () => {
+    const { shell, vol } = createTestShell({
+      '/project/crlf.ts': 'uno\r\nsecond\r\n',
+    });
+
+    const preview = shell.insert('--dry-run', '--after', '/project/crlf.ts', 'uno\n', 'dos\n');
+    expect(preview.code).toBe(0);
+    expect(preview.stdout).toBe('uno\r\ndos\r\nsecond\r\n');
+    assertFileContents(vol, '/project/crlf.ts', 'uno\r\nsecond\r\n');
+
+    const applied = shell.insert('--after', '/project/crlf.ts', 'uno\n', 'dos\n');
+    expect(applied.code).toBe(0);
+    assertFileContents(vol, '/project/crlf.ts', 'uno\r\ndos\r\nsecond\r\n');
+  });
+
+  test('replace preserves missing trailing newlines on unicode paths and content', () => {
+    const { shell, vol } = createTestShell({
+      '/project/naïve-🙂.ts': 'export const café = "🙂";',
+    });
+
+    const result = shell.replace('/project/naïve-🙂.ts', 'café', 'bistro');
+
+    expect(result.code).toBe(0);
+    assertFileContents(vol, '/project/naïve-🙂.ts', 'export const bistro = "🙂";');
   });
 });

@@ -41,4 +41,19 @@ describe('show command', () => {
     expect(ambiguous.code).toBe(1);
     expect(ambiguous.stderr).toBe('show: expected exactly 1 match in demo.ts, found 2');
   });
+
+  test('normalizes CRLF reads, preserves missing trailing newlines, and treats empty files explicitly', () => {
+    const { shell } = createTestShell({
+      '/project/crlf.txt': 'one\r\ntwo\r\nthree',
+      '/project/empty.txt': '',
+    });
+
+    const crlf = shell.show('/project/crlf.txt', 2, 3);
+    expect(crlf.code).toBe(0);
+    expect(crlf.stdout).toBe('two\nthree');
+
+    const empty = shell.show('/project/empty.txt', 1, 1);
+    expect(empty.code).toBe(1);
+    expect(empty.stderr).toBe('show: file is empty: empty.txt');
+  });
 });

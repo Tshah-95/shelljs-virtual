@@ -52,4 +52,39 @@ describe('diff review modes', () => {
     expect(mismatch.code).toBe(1);
     expect(mismatch.stderr).toBe('diff: cannot compare file to directory');
   });
+
+  test('diff renders no-final-newline markers explicitly', () => {
+    const { shell } = createTestShell({
+      '/project/left.txt': 'one\ntwo',
+      '/project/right.txt': 'one\nTWO',
+    });
+
+    const result = shell.diff('/project/left.txt', '/project/right.txt');
+
+    expect(result.code).toBe(1);
+    expect(result.stdout).toContain('-two');
+    expect(result.stdout).toContain('+TWO');
+    expect(result.stdout.match(/\\ No newline at end of file/g)?.length).toBe(2);
+  });
+
+  test('diff reports binary files and unicode paths explicitly', () => {
+    const { shell, fs } = createTestShell({
+      '/before/naïve-🙂.ts': 'export const café = "🙂";\n',
+      '/after/naïve-🙂.ts': 'export const café = "🚀";\n',
+    });
+
+    fs.writeFileSync('/before/blob.bin', new Uint8Array([0, 1]));
+    fs.writeFileSync('/after/blob.bin', new Uint8Array([0, 2]));
+
+    const binary = shell.diff('/before', '/after');
+    expect(binary.code).toBe(1);
+    expect(binary.stdout).toContain('Binary files blob.bin and blob.bin differ');
+    expect(binary.stdout).toContain('naïve-🙂.ts');
+    expect(binary.stdout).toContain('"🚀"');
+
+    const stat = shell.diff('--stat', '/before', '/after');
+    expect(stat.code).toBe(1);
+    expect(stat.stdout).toContain('binary blob.bin');
+    expect(stat.stdout).toContain('naïve-🙂.ts');
+  });
 });

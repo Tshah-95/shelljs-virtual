@@ -230,6 +230,13 @@ sh.grep('-w', 'add', '/project/src/math/add.ts');
 - Default output includes lines, words, and bytes
 - Multiple files include a totals row
 
+### Text And Newline Behavior
+
+- Read-oriented and stream-processing commands normalize CRLF input to LF in `stdout`.
+- `replace()` and `insert()` accept LF-authored search or anchor text against CRLF-backed files.
+- Exact-edit commands preserve the target file's newline style on write when they rewrite an existing file.
+- Files without a trailing newline stay that way unless the command explicitly inserts one.
+
 ### Failure Semantics
 
 - Routine command failures return `.code` and `.stderr` instead of throwing.
@@ -239,12 +246,40 @@ sh.grep('-w', 'add', '/project/src/math/add.ts');
 
 ### Agent-Oriented Commands
 
+#### `patch(patchText)`
+
+- Flags: `--dry-run`, `--check`, `--reverse`
+- Applies unified diffs to one or many files in the virtual filesystem
+- Defaults to all-or-fail behavior across multi-file patches
+- Supports create and delete patches via `/dev/null`
+- Preserves standard no-final-newline patch semantics
+
+#### `replace(path, search, replacement)`
+
+- Flags: `--dry-run`, `--all`, `--regex`, `--expected=N`
+- Defaults to exact single-match replacement
+- Supports file and piped-input modes
+- Fails explicitly on zero or ambiguous matches
+
+#### `insert(mode, path, anchor?, content)`
+
+- Modes: `--before`, `--after`, `--at-start`, `--at-end`
+- Defaults to exact single-anchor matching for before and after modes
+- Supports dry-run previews before mutating files
+
+#### `show(path, startLine, endLine)`
+
+- Flags: `--numbers`, `--around-line`, `--around-match`, `--context=N`
+- Reads exact line ranges or match-centered excerpts
+- Empty files fail explicitly instead of returning accidental output
+
 #### `diff(left, right)`
 
 - Unified output by default
 - Exit code `0` when identical
 - Exit code `1` when different
 - Exit code `2` on command error
+- Renders no-final-newline markers and binary-file output explicitly
 
 #### `splice(file, startLine, deleteCount, ...insertLines)`
 
@@ -317,7 +352,7 @@ The repository includes:
 - Grep-focused text-processing tests covering recursion, context, includes, excludes, piping, and binary skipping
 - New command and piping tests for `diff`, `splice`, `wc`, `which`, `.to()`, and `.toEnd()`
 - Integration tests for codebase exploration, refactoring, and `vol.toJSON()` round-trip persistence
-- Edge cases for unicode, spaces, deep trees, and large directory scans
+- Edge cases for unicode, spaces, deep trees, large directory scans, CRLF content, and no-trailing-newline workflows
 
 ## Limitations
 
