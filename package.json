@@ -28,6 +28,7 @@
   },
   "scripts": {
     "build": "bun run scripts/build.ts",
+    "prepare": "bun run build",
     "lint": "bun run scripts/lint.ts",
     "check": "bun x tsc --noEmit",
     "test": "bun test",
