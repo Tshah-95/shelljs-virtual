@@ -122,6 +122,7 @@ export class Shell {
   rm(...args: unknown[]): ShellString;
   mkdir(...args: unknown[]): ShellString;
   touch(...args: unknown[]): ShellString;
+  write(...args: unknown[]): ShellString;
   ln(...args: unknown[]): ShellString;
   chmod(mode: string | number, ...paths: string[]): ShellString;
   ls(...args: unknown[]): ShellArrayResult<string | LongListEntry>;

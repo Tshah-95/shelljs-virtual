@@ -169,6 +169,19 @@ function buildLineDiff(leftLines: string[], rightLines: string[]): DiffOp[] {
   return ops;
 }
 
+
+/**
+ * Thrown by `Shell.write` when the resolved target path lies outside the
+ * caller-supplied `--root` allowlist. Surfaced as `code: 2` so callers
+ * can distinguish authorization rejections from generic write failures.
+ */
+class WriteOutOfRootError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WriteOutOfRootError';
+  }
+}
+
 export class Shell {
   readonly fs: VirtualFS;
   cwd: string;
@@ -781,6 +794,114 @@ export class Shell {
     }
 
     return this.success('');
+  }
+
+
+  /**
+   * Write content to a virtual-fs path, creating parent directories as
+   * needed. The flat (path, content) shape is the agent-ergonomic
+   * complement to ShellJS's chaining `echo(content).to(path)` API — both
+   * exist because dispatcher contexts (tools, CLIs) need a positional
+   * verb form, not a fluent pipeline.
+   *
+   * Forms:
+   *   shell.write(path, content)
+   *   shell.write('--root=/repo', '--root=/scratch', path, content)
+   *
+   * Path handling:
+   *   - Relative paths resolve against `cwd`.
+   *   - `..` segments collapse via `path.posix.normalize` BEFORE the
+   *     allowed-roots check, so a path like `/repo/foo/../../etc/passwd`
+   *     normalizes to `/etc/passwd` and is rejected if /etc isn't an
+   *     allowed root. (Without this, a startsWith check on the raw input
+   *     would falsely accept `/repo/...` paths that escape via `..`.)
+   *   - Multiple slashes (e.g. `///repo/foo`) and trailing-`.` segments
+   *     are normalized away by the same pass.
+   *
+   * Allowed roots (optional, repeatable `--root <prefix>` or `--root=<prefix>`):
+   *   - When supplied, the resolved path must live under at least one
+   *     allowed root after normalization. Out-of-root writes return
+   *     `code: 2` with a structured error.
+   *   - Caller-side guards (e.g. readonly subtrees within an allowed
+   *     root) belong above this layer.
+   */
+  write(...args: unknown[]): ShellString {
+    try {
+      const { targetPath, content } = this.parseWriteArgs(args);
+      writeTextFile(this.fs, targetPath, content);
+      return this.success(`wrote ${content.length} bytes \u2192 ${targetPath}`);
+    } catch (error) {
+      const code = error instanceof WriteOutOfRootError ? 2 : 1;
+      return this.fail(this.errorMessage(error), code);
+    }
+  }
+
+  private parseWriteArgs(args: unknown[]): {
+    targetPath: string;
+    content: string;
+  } {
+    const allowedRoots: string[] = [];
+    const positional: string[] = [];
+
+    for (let i = 0; i < args.length; i += 1) {
+      const arg = args[i];
+      if (typeof arg !== 'string') continue;
+
+      if (arg === '--root') {
+        const next = args[i + 1];
+        if (typeof next !== 'string' || next.length === 0) {
+          throw new Error('write: --root requires a path');
+        }
+        allowedRoots.push(next);
+        i += 1;
+        continue;
+      }
+      if (arg.startsWith('--root=')) {
+        const value = arg.slice('--root='.length);
+        if (value.length === 0) {
+          throw new Error('write: --root= requires a path');
+        }
+        allowedRoots.push(value);
+        continue;
+      }
+
+      positional.push(arg);
+    }
+
+    if (positional.length === 0) {
+      throw new Error('write: requires a target path');
+    }
+    if (positional.length > 2) {
+      throw new Error(
+        `write: expected <path> [<content>], got ${positional.length} positional args`,
+      );
+    }
+
+    const rawPath = positional[0] ?? '';
+    const content = positional[1] ?? '';
+    if (rawPath.length === 0) {
+      throw new Error('write: <path> must be a non-empty string');
+    }
+
+    const targetPath = this.resolvePath(rawPath);
+
+    if (allowedRoots.length > 0) {
+      const normalizedRoots = allowedRoots.map((root) => {
+        const resolved = resolveVirtualPath(this.cwd, root);
+        return resolved.endsWith('/') ? resolved : `${resolved}/`;
+      });
+      const within = normalizedRoots.some((root) => {
+        const rootNoTrail = root.slice(0, -1);
+        return targetPath === rootNoTrail || targetPath.startsWith(root);
+      });
+      if (!within) {
+        throw new WriteOutOfRootError(
+          `write: ${targetPath} is outside allowed roots (${allowedRoots.join(', ')})`,
+        );
+      }
+    }
+
+    return { targetPath, content };
   }
 
   ln(...args: unknown[]): ShellString {
