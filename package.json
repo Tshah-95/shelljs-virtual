@@ -1,6 +1,6 @@
 {
   "name": "shelljs-virtual",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A memfs-compatible virtual shell inspired by ShellJS.",
   "license": "MIT",
   "type": "module",

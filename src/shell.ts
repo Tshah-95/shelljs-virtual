@@ -24,13 +24,18 @@ import {
 import { expandGlob, matchesGlob } from './utils/glob.js';
 import { basenameVirtualPath, dirnameVirtualPath, normalizeVirtualPath, resolveVirtualPath } from './utils/path.js';
 import type {
+  HookResult,
+  HookVetoResult,
   LongListEntry,
+  MutationCtx,
   ParsedFindOptions,
   ParsedGrepOptions,
   ParsedHeadTailOptions,
   ParsedSortOptions,
   ParsedUniqOptions,
   ShellConfig,
+  ShellListener,
+  VerbName,
   VirtualFS,
 } from './types.js';
 import { ShellArrayResult, ShellString } from './utils/pipe.js';
@@ -188,6 +193,8 @@ export class Shell {
   env: Record<string, string>;
   silent: boolean;
   fatal: boolean;
+  private readonly listeners: ShellListener[];
+  private beforeModel: unknown;
 
   constructor(config: ShellConfig) {
     this.fs = config.fs;
@@ -195,6 +202,18 @@ export class Shell {
     this.env = { ...(config.env ?? {}) };
     this.silent = config.silent ?? false;
     this.fatal = config.fatal ?? false;
+    this.listeners = config.listeners ?? [];
+    this.beforeModel = config.beforeModel;
+  }
+
+  /**
+   * Update the `MutationCtx.beforeModel` value passed to listeners on the
+   * next verb call. Carlo's dispatcher uses this between calls to thread
+   * the cached `CompileResult` through. Treated as opaque — never inspected
+   * or cloned by the package.
+   */
+  setBeforeModel(model: unknown): void {
+    this.beforeModel = model;
   }
 
   resolvePath(target = '.'): string {
@@ -404,13 +423,18 @@ export class Shell {
         return { target, updated: apply(source) };
       });
 
+      let aggregated: HookResult | undefined;
       if (inPlace) {
         for (const update of updates) {
-          writeTextFile(this.fs, update.target, update.updated);
+          const dispatch = this.dispatchHooks('sed', update.target, update.updated);
+          if ('veto' in dispatch) {
+            return this.fail(`sed: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+          }
+          aggregated = this.mergeHookResults(aggregated, dispatch.hookResult);
         }
       }
 
-      return this.success(updates.map((update) => update.updated).join('\n'));
+      return this.success(updates.map((update) => update.updated).join('\n'), 0, aggregated);
     } catch (error) {
       return this.fail(this.errorMessage(error));
     }
@@ -424,7 +448,11 @@ export class Shell {
       const output = this.applyReplace(source, search, replacement, options, label);
 
       if (!options.dryRun && targetPath) {
-        writeTextFile(this.fs, targetPath, output);
+        const dispatch = this.dispatchHooks('replace', targetPath, output);
+        if ('veto' in dispatch) {
+          return this.fail(`replace: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+        }
+        return this.success(output, 0, dispatch.hookResult);
       }
 
       return this.success(output);
@@ -440,7 +468,11 @@ export class Shell {
       const output = this.applyInsert(source, anchor, content, options, label);
 
       if (!options.dryRun) {
-        writeTextFile(this.fs, targetPath, output);
+        const dispatch = this.dispatchHooks('insert', targetPath, output);
+        if ('veto' in dispatch) {
+          return this.fail(`insert: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+        }
+        return this.success(output, 0, dispatch.hookResult);
       }
 
       return this.success(output);
@@ -828,8 +860,15 @@ export class Shell {
   write(...args: unknown[]): ShellString {
     try {
       const { targetPath, content } = this.parseWriteArgs(args);
-      writeTextFile(this.fs, targetPath, content);
-      return this.success(`wrote ${content.length} bytes \u2192 ${targetPath}`);
+      const dispatch = this.dispatchHooks('write', targetPath, content);
+      if ('veto' in dispatch) {
+        return this.fail(`write: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+      }
+      return this.success(
+        `wrote ${content.length} bytes \u2192 ${targetPath}`,
+        0,
+        dispatch.hookResult,
+      );
     } catch (error) {
       const code = error instanceof WriteOutOfRootError ? 2 : 1;
       return this.fail(this.errorMessage(error), code);
@@ -1026,6 +1065,7 @@ export class Shell {
       const mutations = this.buildPatchMutations(patches);
       const action = options.dryRun || options.check ? 'checked' : 'patched';
 
+      let aggregated: HookResult | undefined;
       if (!options.dryRun && !options.check) {
         for (const mutation of mutations) {
           if (mutation.deleted) {
@@ -1037,7 +1077,12 @@ export class Shell {
             continue;
           }
 
-          writeTextFile(this.fs, mutation.targetPath, mutation.output);
+          const dispatch = this.dispatchHooks('patch', mutation.targetPath, mutation.output);
+          if ('veto' in dispatch) {
+            return this.fail(`patch: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+          }
+          aggregated = this.mergeHookResults(aggregated, dispatch.hookResult);
+
           if (mutation.sourcePath && mutation.sourcePath !== mutation.targetPath && this.fs.existsSync(mutation.sourcePath)) {
             this.removeNode(mutation.sourcePath, false, false);
           }
@@ -1055,7 +1100,7 @@ export class Shell {
         })
         .join('\n');
 
-      return this.success(stdout);
+      return this.success(stdout, 0, aggregated);
     } catch (error) {
       return this.fail(this.errorMessage(error));
     }
@@ -1111,7 +1156,11 @@ export class Shell {
       const output = joinLines(updated, trailingNewline || insertLines.length > 0);
 
       if (!dryRun) {
-        writeTextFile(this.fs, target, output);
+        const dispatch = this.dispatchHooks('splice', target, output);
+        if ('veto' in dispatch) {
+          return this.fail(`splice: ${dispatch.veto.reason}`, 1, dispatch.hookResult);
+        }
+        return this.success(output, 0, dispatch.hookResult);
       }
 
       return this.success(output);
@@ -1908,16 +1957,172 @@ export class Shell {
     return isPipeInput(last) ? last : undefined;
   }
 
-  private success(stdout: string, code = 0): ShellString {
-    return new ShellString(stdout, { code, shell: this });
+  private success(stdout: string, code = 0, hookResult?: HookResult): ShellString {
+    return new ShellString(stdout, { code, shell: this, hookResult });
   }
 
-  private fail(stderr: string, code = 1): ShellString {
-    return new ShellString('', { code, stderr, shell: this });
+  private fail(stderr: string, code = 1, hookResult?: HookResult): ShellString {
+    return new ShellString('', { code, stderr, shell: this, hookResult });
   }
 
   private errorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
+  }
+
+  /**
+   * Run the listener pipeline for a content-mutation verb, then perform the
+   * write. Returns either:
+   *   - `{ veto: HookVetoResult, hookResult }` — onBefore vetoed; no write happened.
+   *   - `{ ok: true, hookResult }` — write completed; aggregated results follow.
+   *
+   * Composition rules (locked by tests):
+   *   - Listeners run in registration order.
+   *   - Non-matching `match` glob skips ALL handlers including onBefore.
+   *   - onBefore exceptions are caught, captured as warnings, treated NON-veto.
+   *   - First {refuse:true} aborts; subsequent listeners do not fire onBefore.
+   *   - Per-verb handler runs after the write, then onAny.
+   *   - Per-handler exceptions are caught, captured as warnings.
+   *   - diagnostics/warnings concat (registration order); impact/workspaceEdit/
+   *     beforeModelHint use last-non-undefined-wins.
+   *   - Handler returning `undefined` is a no-op (skipped, doesn't crash).
+   *
+   * If no listeners match, returns `{ ok: true, hookResult: undefined }` and
+   * the verb performs its write directly. The hookResult field on ShellString
+   * stays undefined — the listener pipeline was a true no-op.
+   */
+  private dispatchHooks(verb: VerbName, target: string, content: string):
+    | { veto: HookVetoResult; hookResult: HookResult }
+    | { ok: true; hookResult: HookResult | undefined } {
+    const matched = this.listeners.filter((listener) =>
+      this.listenerMatches(listener, target),
+    );
+
+    if (matched.length === 0) {
+      // Fast path: no listener cares about this path. Perform the write and
+      // return undefined hookResult so callers know nothing was aggregated.
+      writeTextFile(this.fs, target, content);
+      return { ok: true, hookResult: undefined };
+    }
+
+    const prevContent: string | undefined = this.fs.existsSync(target)
+      ? readTextFile(this.fs, target)
+      : undefined;
+
+    const ctx: MutationCtx = {
+      verb,
+      path: target,
+      content,
+      prevContent,
+      fs: this.fs,
+      beforeModel: this.beforeModel,
+    };
+
+    const warnings: string[] = [];
+    const diagnostics: unknown[] = [];
+    let impact: unknown;
+    let workspaceEdit: unknown;
+    let beforeModelHint: unknown;
+
+    // Phase 1: onBefore. First {refuse:true} aborts. Throws are non-veto.
+    for (const listener of matched) {
+      if (!listener.onBefore) continue;
+      let veto: HookVetoResult | undefined;
+      try {
+        veto = listener.onBefore(ctx);
+      } catch (error) {
+        warnings.push(`onBefore threw: ${this.errorMessage(error)}`);
+        continue;
+      }
+      if (veto && veto.refuse === true) {
+        if (veto.diagnostics) diagnostics.push(...veto.diagnostics);
+        return {
+          veto,
+          hookResult: { warnings, diagnostics },
+        };
+      }
+    }
+
+    // Phase 2: perform the actual write.
+    writeTextFile(this.fs, target, content);
+
+    // Phase 3: per-verb handler + onAny on each matched listener.
+    const verbHandlerKey = (
+      'on' + verb.charAt(0).toUpperCase() + verb.slice(1)
+    ) as keyof ShellListener;
+
+    const applyResult = (result: HookResult | undefined): void => {
+      if (!result) return;
+      if (result.diagnostics) diagnostics.push(...result.diagnostics);
+      if (result.warnings) warnings.push(...result.warnings);
+      if (result.impact !== undefined) impact = result.impact;
+      if (result.workspaceEdit !== undefined) workspaceEdit = result.workspaceEdit;
+      if (result.beforeModelHint !== undefined) beforeModelHint = result.beforeModelHint;
+    };
+
+    for (const listener of matched) {
+      const verbHandler = listener[verbHandlerKey] as
+        | ((ctx: MutationCtx) => HookResult | undefined)
+        | undefined;
+      if (typeof verbHandler === 'function') {
+        try {
+          applyResult(verbHandler(ctx));
+        } catch (error) {
+          warnings.push(`${verb} threw: ${this.errorMessage(error)}`);
+        }
+      }
+      if (typeof listener.onAny === 'function') {
+        try {
+          applyResult(listener.onAny(ctx));
+        } catch (error) {
+          warnings.push(`onAny threw: ${this.errorMessage(error)}`);
+        }
+      }
+    }
+
+    // Update internal beforeModel if a listener fed back a hint.
+    if (beforeModelHint !== undefined) {
+      this.beforeModel = beforeModelHint;
+    }
+
+    return {
+      ok: true,
+      hookResult: { diagnostics, warnings, impact, workspaceEdit, beforeModelHint },
+    };
+  }
+
+  /**
+   * Merge two hookResult shells. Used by verbs that issue multiple writes
+   * in one call (e.g. sed across N files). Concat diagnostics/warnings;
+   * last-non-undefined wins for impact/workspaceEdit/beforeModelHint.
+   */
+  private mergeHookResults(
+    left: HookResult | undefined,
+    right: HookResult | undefined,
+  ): HookResult | undefined {
+    if (!left) return right;
+    if (!right) return left;
+    return {
+      diagnostics: [...(left.diagnostics ?? []), ...(right.diagnostics ?? [])],
+      warnings: [...(left.warnings ?? []), ...(right.warnings ?? [])],
+      impact: right.impact !== undefined ? right.impact : left.impact,
+      workspaceEdit:
+        right.workspaceEdit !== undefined ? right.workspaceEdit : left.workspaceEdit,
+      beforeModelHint:
+        right.beforeModelHint !== undefined ? right.beforeModelHint : left.beforeModelHint,
+    };
+  }
+
+  /**
+   * Match a listener's `match` glob/regex/array against a path.
+   * Empty array = match-nothing (fail-closed).
+   */
+  private listenerMatches(listener: ShellListener, target: string): boolean {
+    const patterns = Array.isArray(listener.match) ? listener.match : [listener.match];
+    if (patterns.length === 0) return false;
+    return patterns.some((pattern) => {
+      if (typeof pattern === 'string') return matchesGlob(pattern, target);
+      return pattern.test(target);
+    });
   }
 
   private expandPaths(value: string): string[] {

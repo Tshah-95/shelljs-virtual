@@ -1,5 +1,5 @@
 import { appendTextFile, writeTextFile } from '../common.js';
-import type { ResultOptions } from '../types.js';
+import type { HookResult, ResultOptions } from '../types.js';
 import type { Shell } from '../shell.js';
 
 export type ShellResult = ShellString | ShellArrayResult<unknown>;
@@ -8,12 +8,21 @@ export class ShellString {
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number;
+  /**
+   * Listener output aggregated for this verb call. Present on content-
+   * mutation verbs (write/replace/sed/insert/patch/splice) when at least
+   * one listener was registered AND matched the verb's path. Undefined
+   * otherwise. Carlo's `dispatchShell` reads this to surface diagnostics
+   * to the inner agent.
+   */
+  readonly hookResult?: HookResult;
   protected readonly shell?: Shell;
 
   constructor(stdout = '', options: ResultOptions & { shell?: Shell } = {}) {
     this.stdout = stdout;
     this.stderr = options.stderr ?? '';
     this.code = options.code ?? 0;
+    this.hookResult = options.hookResult;
     this.shell = options.shell;
   }
 
