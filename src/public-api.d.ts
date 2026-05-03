@@ -41,6 +41,45 @@ export interface ShellConfig {
   env?: Record<string, string>;
   silent?: boolean;
   fatal?: boolean;
+  listeners?: ShellListener[];
+  beforeModel?: unknown;
+}
+
+export type VerbName = 'write' | 'replace' | 'splice' | 'sed' | 'patch' | 'insert';
+
+export interface MutationCtx {
+  verb: VerbName;
+  path: string;
+  content: string;
+  prevContent: string | undefined;
+  fs: VirtualFS;
+  beforeModel?: unknown;
+}
+
+export interface HookResult {
+  diagnostics?: unknown[];
+  impact?: unknown;
+  workspaceEdit?: unknown;
+  warnings?: string[];
+  beforeModelHint?: unknown;
+}
+
+export interface HookVetoResult {
+  refuse: true;
+  reason: string;
+  diagnostics?: unknown[];
+}
+
+export interface ShellListener {
+  match: string | RegExp | (string | RegExp)[];
+  onWrite?: (ctx: MutationCtx) => HookResult | undefined;
+  onReplace?: (ctx: MutationCtx) => HookResult | undefined;
+  onSplice?: (ctx: MutationCtx) => HookResult | undefined;
+  onSed?: (ctx: MutationCtx) => HookResult | undefined;
+  onPatch?: (ctx: MutationCtx) => HookResult | undefined;
+  onInsert?: (ctx: MutationCtx) => HookResult | undefined;
+  onAny?: (ctx: MutationCtx) => HookResult | undefined;
+  onBefore?: (ctx: MutationCtx) => HookVetoResult | undefined;
 }
 
 export interface ShellResultBase {
@@ -51,10 +90,11 @@ export interface ShellResultBase {
 }
 
 export class ShellString implements ShellResultBase {
-  constructor(stdout?: string, options?: { code?: number; stderr?: string });
+  constructor(stdout?: string, options?: { code?: number; stderr?: string; hookResult?: HookResult });
   readonly stdout: string;
   readonly stderr: string;
   readonly code: number;
+  readonly hookResult?: HookResult;
   toString(): string;
   to(file: string): this;
   toEnd(file: string): this;
@@ -104,6 +144,7 @@ export class Shell {
   env: Record<string, string>;
   silent: boolean;
   fatal: boolean;
+  setBeforeModel(model: unknown): void;
   resolvePath(target?: string): string;
   cd(target?: string): ShellString;
   pwd(): ShellString;
